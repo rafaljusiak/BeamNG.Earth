@@ -8548,24 +8548,29 @@ def deck_pads(decks, ground_roads, box, ground_fn, own=True):
     return out
 
 
-def _on_decks(pts, surfaces, dz=None):
-    """Which points (k, 3) lie on a deck's carriageway: within the half width of one of surfaces [(centre line (m, 2),
-    z (m,), half width)], at its height there (within dz, default PAD_JOIN_Z_M: a deck passing over or under is not
-    the paving going on). Pure."""
+def _on_decks(pts, surfaces, dz=None, grow=0.0):
+    """Which points (k, 3) lie on a deck's carriageway: within the half width (+ grow) of one of surfaces [(centre
+    line (m, 2), z (m,), half width)], beside it (a deck ends square: a point past its end is not on it), at its height
+    there (within dz, default PAD_JOIN_Z_M: a deck passing over or under is not the paving going on). Pure."""
     pts = np.asarray(pts, np.float64).reshape(-1, 3)
     dz = PAD_JOIN_Z_M if dz is None else dz
     on = np.zeros(len(pts), bool)
+    if not len(pts):
+        return on
     for xy, z, half in surfaces:
-        if (pts[:, 0].max() < xy[:, 0].min() - half or pts[:, 0].min() > xy[:, 0].max() + half or
-                pts[:, 1].max() < xy[:, 1].min() - half or pts[:, 1].min() > xy[:, 1].max() + half):
+        half = half + grow
+        if len(xy) < 2 or (pts[:, 0].max() < xy[:, 0].min() - half or pts[:, 0].min() > xy[:, 0].max() + half or
+                           pts[:, 1].max() < xy[:, 1].min() - half or pts[:, 1].min() > xy[:, 1].max() + half):
             continue
         a, d = xy[:-1], np.diff(xy, axis=0)
-        t = np.clip(((pts[:, None, :2] - a[None]) * d[None]).sum(2) / np.maximum((d * d).sum(1), 1e-12)[None], 0.0, 1.0)
+        raw = ((pts[:, None, :2] - a[None]) * d[None]).sum(2) / np.maximum((d * d).sum(1), 1e-12)[None]
+        t = np.clip(raw, 0.0, 1.0)
         dist = np.hypot(*(a[None] + t[..., None] * d[None] - pts[:, None, :2]).transpose(2, 0, 1))
         j = np.argmin(dist, axis=1)
         k = np.arange(len(pts))
+        past = ((j == 0) & (raw[k, j] <= 0.0)) | ((j == len(a) - 1) & (raw[k, j] >= 1.0))
         zs = z[j] + t[k, j] * (z[j + 1] - z[j])
-        on |= (dist[k, j] <= half) & (np.abs(zs - pts[:, 2]) <= dz)
+        on |= (dist[k, j] <= half) & ~past & (np.abs(zs - pts[:, 2]) <= dz)
     return on
 
 
@@ -8750,6 +8755,9 @@ def _deck_chunks(decks, exact, ground_fn=None, depths=None, walks=None, shift_of
     for i, (fid, spec, pts, lon) in enumerate(decks):
         sh = shift_of(fid, pts) if shift_of else None
         shifted[i] = offset_polyline(pts, sh) if sh is not None else pts
+    surfaces = [(np.asarray(shifted[i], np.float64)[:, :2], np.asarray(shifted[i], np.float64)[:, 2], spec.width / 2)
+                if len(shifted[i]) >= 2 and np.isfinite(np.asarray(shifted[i], np.float64)).all() else None
+                for i, (_fid, spec, _pts, _lon) in enumerate(decks)]     # (the carriageways: _walk_off_decks)
     # Complete profiles survive tile clipping. The bounded common field currently covers constant-width,
     # unshifted carriageways; keep existing sidewalk/taper/lane-shift geometry on its current surface.
     counts = {}
@@ -8815,10 +8823,12 @@ def _deck_chunks(decks, exact, ground_fn=None, depths=None, walks=None, shift_of
                 lines.append((look, w, line))
         if walks.get(fid):                      # its sidewalks, flush on the deck beside the carriageway
             wm, sides = walks[fid]
+            others = [sf for j, sf in enumerate(surfaces) if sf is not None and decks[j][0] != fid]
             for side in sides:
                 line = offset_polyline(pts, side * (spec.width / 2 + wm / 2))
                 line[:, 2] += DECK_WALK_LIFT_M
-                lines.append((DECK_WALK, wm, line))
+                for run in _walk_off_decks(line, wm, others):
+                    lines.append((DECK_WALK, wm, run))
         for look, w, line in lines:
             for piece in clip_polyline(line, *exact):
                 for c in split(densify(simplify(piece, ztol=SIMPLIFY_Z_M))):
@@ -8845,6 +8855,38 @@ def _deck_chunks(decks, exact, ground_fn=None, depths=None, walks=None, shift_of
                         out.append(ch)
     out.extend(rampmerges.chunks(layouts, exact, fixed=True))
     return roadmarkings.paint(out)
+
+
+DECK_WALK_ON_M = 0.3        # m of a deck's sidewalk strip on another deck's carriageway before it stops there ...
+DECK_WALK_MIN_M = 2.0       # ... and a piece left between two carriageways shorter than this is left out
+DECK_WALK_STEP_M = 1.0      # m between the strip's points tested
+
+
+def _walk_off_decks(line, wm, others):
+    """The pieces of a deck's sidewalk strip (its centre line (k, 3), wm wide) off the other decks' carriageways
+    (others: _on_decks' surfaces): the strip stops where a carriageway at its height crosses or joins it, as a sidewalk
+    does at a side street. A junction of links on decks (Warsaw, Aleja Niepodleglosci over the Trasa Lazienkowska's
+    tunnel) had each link's strip, 2.5 m of pale concrete, drawn across the lanes of the links crossing it. Pure."""
+    line = np.asarray(line, np.float64)
+    if not others or len(line) < 2:
+        return [line]
+    pts = densify(line, DECK_WALK_STEP_M)
+    on = _on_decks(pts, others, grow=wm / 2 - DECK_WALK_ON_M)
+    if not on.any():
+        return [line]
+    out, i, k = [], 0, len(pts)
+    while i < k:
+        if on[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < k and not on[j + 1]:
+            j += 1
+        run = pts[i:j + 1]
+        if j > i and float(np.hypot(*np.diff(run[:, :2], axis=0).T).sum()) >= DECK_WALK_MIN_M:
+            out.append(run)
+        i = j + 1
+    return out
 
 
 def _deck_clearance(ch):
