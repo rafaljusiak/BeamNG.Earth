@@ -1,4 +1,5 @@
-"""Build server/data/pl_lod2_sheets.json.gz: where GUGiK's LoD2 3D building models of Poland are (pl_lod2.py).
+"""Build server/data/pl_lod2_sheets.json.gz: where GUGiK's LoD2 3D building models of Poland are (pl_lod2.py);
+with --lod1, server/data/pl_lod1_sheets.json.gz: where its LoD1 2024 models are (every powiat: heights, pl_lod2.py).
 
 GUGiK publishes the models (CityGML 2.0, LoD2, 2015-2018) as one zip per powiat (county), named by its TERYT code:
 https://opendata.geoportal.gov.pl/InneDane/Budynki3D/LOD2/<TERYT>_gml.zip, each holding one file per 1:5,000 map
@@ -10,7 +11,12 @@ sizes, CRC-32 and compression method. The server then needs one Range request pe
 and knows offline where there are models. A zip that has changed since (its size or the entry's CRC differ) is
 found at runtime and left out (the Overture buildings stay).
 
-  python tools/build_pl_lod2_index.py [--out server/data/pl_lod2_sheets.json.gz]
+  python tools/build_pl_lod2_index.py [--lod1] [--out PATH]
+
+LoD1 2024 (blocks of one measured height, from the 2023 laser scan; every powiat): one zip per powiat under its
+voivodeship, https://opendata.geoportal.gov.pl/InneDane/Budynki3D/LOD1/2024/<voivodeship>/<TERYT>.zip, the sheet
+files at its root (<TERYT>_<sheet>.gml, the 1:50,000 letter lower case). The index's "url" says where a powiat's zip is
+({teryt}, {woj}); its sheet names are written as the LoD2 ones (N-34-139-A-c-1-1).
 
 Licence of the data: CC BY 4.0 (GUGiK); the index is facts about the files. Run by hand when GUGiK publishes more.
 """
@@ -30,6 +36,18 @@ import urllib.request
 import zipfile
 
 BASE = "https://opendata.geoportal.gov.pl/InneDane/Budynki3D/LOD2/"
+URLS = {"lod2": BASE + "{teryt}_gml.zip",
+        "lod1": "https://opendata.geoportal.gov.pl/InneDane/Budynki3D/LOD1/2024/{woj}/{teryt}.zip"}
+DATASET = ["lod2"]          # (main's choice)
+
+
+def url_of(code):
+    return URLS[DATASET[0]].format(teryt=code, woj=code[:2])
+
+
+def canonical(sheet):
+    p = sheet.split("-")
+    return "-".join(p[:3] + [p[3].upper(), p[4].lower()] + p[5:])
 UA = "BeamNG.Earth data build (https://github.com/TecnaGamer/BeamNG.Earth)"
 NAME = re.compile(r"(?:^|/)(\d{4})_([A-Z]-\d{1,2}-\d{1,3}-[A-D]-[a-d]-[1-4]-[1-4])\.gml$", re.I)
 
@@ -79,7 +97,7 @@ class RangeReader(io.RawIOBase):
 
 
 def head(code):
-    url = f"{BASE}{code}_gml.zip"
+    url = url_of(code)
     try:
         with _open(urllib.request.Request(url, method="HEAD", headers={"User-Agent": UA}), 60) as r:
             return code, int(r.headers["Content-Length"]), r.headers.get("Last-Modified")
@@ -90,7 +108,7 @@ def head(code):
 
 
 def entries(code, size):
-    z = zipfile.ZipFile(io.BufferedReader(RangeReader(f"{BASE}{code}_gml.zip", size), buffer_size=1 << 16))
+    z = zipfile.ZipFile(io.BufferedReader(RangeReader(url_of(code), size), buffer_size=1 << 16))
     out = []
     for i in z.infolist():
         m = NAME.search(i.filename)
@@ -98,20 +116,22 @@ def entries(code, size):
             continue
         if m.group(1) != code:
             print(f"  {code}: {i.filename} names powiat {m.group(1)}", file=sys.stderr)
-        out.append((m.group(2), [code, i.header_offset, i.compress_size, i.file_size, i.CRC, i.compress_type]))
+        out.append((canonical(m.group(2)), [code, i.header_offset, i.compress_size, i.file_size, i.CRC, i.compress_type]))
     return out
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--out", default=os.path.join(os.path.dirname(__file__), "..", "server", "data",
-                                                  "pl_lod2_sheets.json.gz"))
+    ap.add_argument("--lod1", action="store_true", help="LoD1 2024's index instead of LoD2's")
+    ap.add_argument("--out", default=None)
     a = ap.parse_args()
-    # TERYT powiat codes: voivodeships 02..32 (even), land powiats 01..35, city powiats 61..65
-    codes = [f"{w:02d}{p:02d}" for w in range(2, 33, 2) for p in list(range(1, 36)) + list(range(61, 66))]
+    DATASET[0] = "lod1" if a.lod1 else "lod2"
+    a.out = a.out or os.path.join(os.path.dirname(__file__), "..", "server", "data", f"pl_{DATASET[0]}_sheets.json.gz")
+    # TERYT powiat codes: voivodeships 02..32 (even), land powiats 01..40, city powiats 61..80 (Silesia's run to 79)
+    codes = [f"{w:02d}{p:02d}" for w in range(2, 33, 2) for p in list(range(1, 41)) + list(range(61, 81))]
     with cf.ThreadPoolExecutor(4) as ex:
         found = [(c, n, lm) for c, n, lm in ex.map(head, codes) if n]
-    print(f"{len(found)} powiats with LoD2 of {len(codes)} codes asked", file=sys.stderr)
+    print(f"{len(found)} powiats with {DATASET[0]} of {len(codes)} codes asked", file=sys.stderr)
     zips, sheets = {}, {}
     with cf.ThreadPoolExecutor(4) as ex:
         for (code, size, lm), ents in zip(found, ex.map(lambda f: entries(f[0], f[1]), found)):
@@ -120,7 +140,7 @@ def main():
                 sheets.setdefault(sheet, []).append(e)
             print(f"  {code}: {len(ents)} sheets, {size / 1e6:.1f} MB", file=sys.stderr)
     doc = {"format": 1, "retrieved_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"),
-           "base": BASE, "licence": "CC BY 4.0", "attribution": "GUGiK (Główny Urząd Geodezji i Kartografii)",
+           "base": BASE if DATASET[0] == "lod2" else "", "url": URLS[DATASET[0]], "licence": "CC BY 4.0", "attribution": "GUGiK (Główny Urząd Geodezji i Kartografii)",
            "fields": ["teryt", "offset", "compressed", "size", "crc32", "method"],
            "zips": dict(sorted(zips.items())), "sheets": {k: sorted(v) for k, v in sorted(sheets.items())}}
     raw = json.dumps(doc, separators=(",", ":"), ensure_ascii=False).encode()
