@@ -286,6 +286,33 @@ class PoleTest(unittest.TestCase):
         self.assertIn(furniture.G_POLE, [x[0] for x in rows])
         self.assertNotIn(furniture.G_POLELAMP, [x[0] for x in rows])
 
+    def test_poland_concrete_poles_and_cabled_main_streets(self):
+        """Poland without --regional-poles (a report from Warsaw, 2026-11-13: US wooden poles and wires along its dual
+        carriageways): a town's main streets are cabled (lamp posts, no poles, whatever the hash says), and where a
+        line does run overhead its pole is the kit's concrete one, not the stock timber pole. Elsewhere as before."""
+        import poleprofiles
+        self.assertEqual(furniture.buried_share("pl"), 0.35)
+        own = poleprofiles.default_style("pl")
+        self.assertEqual(own.group, "eu_pole_concrete_open")
+        self.assertIsNone(poleprofiles.default_style("US"))
+        self.assertIsNone(poleprofiles.default_style(None))
+        for cls in ("primary", "secondary"):
+            for k in range(20):
+                rows = furniture.place([road(f"m{k}", cls, True)], [], (0, 0, 256, 256), wires=[], country="PL")
+                groups = {x[0] for x in rows}
+                self.assertFalse(groups & {furniture.G_POLE, own.group}, "a cabled main street")
+                self.assertIn(furniture.G_LAMP, groups)
+        wires = []
+        rows = furniture.place([road("c", "tertiary", False)], [], (0, 0, 256, 256), wires=wires, country="PL")
+        groups = [x[0] for x in rows]
+        self.assertGreaterEqual(groups.count(own.group), 5)             # (a country road: overhead, on Poland's pole)
+        self.assertNotIn(furniture.G_POLE, groups)
+        self.assertTrue(wires)
+        rows = furniture.place([road("c", "tertiary", False)], [], (0, 0, 256, 256), wires=[], country="US")
+        self.assertIn(furniture.G_POLE, [x[0] for x in rows])
+        rows = furniture.place([road("m0", "primary", True)], [], (0, 0, 256, 256), wires=[], country="US")
+        self.assertIn(furniture.G_POLE, [x[0] for x in rows])
+
     def test_buried_lines_no_poles(self):
         """The country's low-voltage lines underground (furniture.BURIED_LV, the user 2026-10-26: poles "almost
         everywhere"): that share of the roads (hashed) have no poles; all of them in the Netherlands."""

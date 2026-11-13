@@ -581,8 +581,15 @@ G_POLELAMP = "polelamp"     # a cobra-head arm on a utility pole (East Coast USA
 # Switzerland (not in that study; GitHub #911: poles along rural Swiss roads that have none): ElCom's line inventory at
 # 2009-12-31, 78,837 km of low-voltage cable (network level 7) to 12,720 km of low-voltage overhead line, 0.86; ElCom's
 # "ElCom in 2024, a brief overview": 90 % of the distribution network underground.
+# Poland (not in that study either; a report from Warsaw, 2026-11-13: wooden poles and wires along its dual
+# carriageways): about a third of its low-voltage line length is cable (an estimate from the distribution operators'
+# yearly figures, not checked against a source here), nearly all of it in the towns; see also CABLED_TOWN.
 BURIED_LV = {"NL": 1.0, "CH": 0.86, "GB": 0.81, "DE": 0.75, "DK": 0.65, "BE": 0.44, "NO": 0.38, "IT": 0.30,
-             "FR": 0.27, "PT": 0.19, "AT": 0.15, "ES": 0.14}
+             "FR": 0.27, "PL": 0.35, "PT": 0.19, "AT": 0.15, "ES": 0.14}
+# Countries where a town's main streets (these classes, in built-up land) never carry their lines on poles, whatever
+# the country's share: a national share is mostly its villages' and country roads'. Poland: a city's arterials are
+# cabled, lit by steel or concrete lamp posts; its overhead lines are along village streets and side streets.
+CABLED_TOWN = {"PL": frozenset({"trunk", "primary", "secondary"})}
 
 
 def buried_share(country):
@@ -943,6 +950,10 @@ def place(roads, walks, box, curb_h=0.15, wires=None, town=False, left_hand=Fals
     poleprofiles profile (PR #505); changes the pole shape and its wire attachment geometry, never its placement or
     lamp spacing. pole_frame: ENU frame for the position-based country profiles."""
     pole_at = poleprofiles.selector(pole_profile, pole_frame)
+    if pole_profile is None and poleprofiles.default_style(country) is not None:
+        _own_pole = poleprofiles.default_style(country)     # (the country's own pole without --regional-poles: Poland's)
+        pole_at = lambda fid, x, y, z: _own_pole            # noqa: E731
+    cabled = CABLED_TOWN.get(str(country or "").upper(), frozenset())
     kit_at = poleprofiles.kit_selector(pole_profile, pole_frame)
     spacing_of = lamp_spacing(region, dense=not town)
     lighting = lighting or {}  # OSM way lighting; absent/unknown keeps the inferred rule
@@ -953,6 +964,8 @@ def place(roads, walks, box, curb_h=0.15, wires=None, town=False, left_hand=Fals
         import franceroads
         sp = by_fid.get(fid, (None, None))[0]
         if sp is not None and franceroads.enabled(sp) and not sp.urban:
+            return False
+        if sp is not None and sp.urban and sp.cls in cabled:
             return False
         return _h01(fid, "buried") >= buried
     clearance = clearance if clearance is not None else RoadClearance(

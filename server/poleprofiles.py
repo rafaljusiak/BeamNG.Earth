@@ -30,6 +30,20 @@ EU_KIT = europeinfra.VERSION
 # Overseas territories keep their own codes. Geometry families can be shared.
 EUROPE_COUNTRIES = europeinfra.COUNTRIES
 FR_DEMO = "fr-recessed-demo-v1"
+# Without --regional-poles (the default): the countries whose roadside poles are still not the stock North American
+# timber pole with its cross-arm (furniture.place, by the anchor's country). Poland (2026-11-13, a report from Warsaw:
+# "US-style wooden utility poles"): its low-voltage lines hang on concrete poles, the hollow-web ZN poles above all;
+# the kit's concrete_open is that family (models and trees.lua's catalog ship with the mod whatever the mode).
+# The kit's own mix (concrete_open / wood_a) stays --regional-poles europe's.
+DEFAULT_STYLES = {
+    "PL": PoleStyle("eu_pole_concrete_open", europeinfra.POLE_LAYOUTS["concrete_open"][0],
+                    europeinfra.POLE_LAYOUTS["concrete_open"][1], .012),
+}
+
+
+def default_style(country):
+    """The country's (ISO 3166 alpha-2) pole when no regional profile is on, or None: the stock one."""
+    return DEFAULT_STYLES.get(str(country or "").strip().upper())
 FR_ALL = "fr-recessed-all-v1"
 
 
