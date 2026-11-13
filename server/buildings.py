@@ -406,7 +406,35 @@ STYLES = {
                   paint=0.0, wall_tints=(0, 1, 2, 3, 4, 5, 6, 8)),
     "cool": Style("cool", 0.3, ((SIDING, 0.4),), 0.05, 0.1, 0.3, (_DARK, (ROOF_METAL, (0, 1, 2, 3))), pitch=30.0,
                   paint=0.3, barn_red=0.5),
+    # Poland (the user, 2026-11-13: Warsaw came out as europe_north's brick with steep roofs): pale plaster over
+    # brick or block (the brick shows in old towns and on pre-war tenements only), houses with plaster walls under
+    # 30-35 degree roofs of red-brown tile or dark sheet metal tiles, hipped as often as gabled, some flat or nearly
+    # flat (the post-war "kostka" cube house); blocks of flats flat-roofed; few attached houses outside old towns
+    "poland": Style("poland", 0.12, ((STUCCO, 0.8),), 0.02, 0.12, 0.45, (_CLAY, _DARK), pitch=33.0, paint=0.08,
+                    wall_tints=(0, 1, 2, 3, 4), attached=0.3),
 }
+
+# Poland's border, coarse (lat, lon; ~10-20 km off in places): region_style stays a pure function of the position (no
+# border data needed, the same on every machine)
+POLAND = np.array([
+    (53.92, 14.22), (54.20, 15.50), (54.58, 16.90), (54.83, 18.30), (54.60, 18.85), (54.36, 19.62), (54.40, 21.00),
+    (54.36, 22.79), (53.89, 23.51), (53.10, 23.95), (52.62, 23.95), (52.07, 23.65), (51.55, 23.55), (51.17, 23.85),
+    (50.81, 24.15), (50.40, 24.00), (50.25, 23.60), (49.80, 23.00), (49.55, 22.75), (49.08, 22.57), (49.40, 21.50),
+    (49.20, 20.50), (49.20, 19.90), (49.55, 19.50), (49.52, 18.85), (49.75, 18.63), (50.05, 18.00), (50.32, 17.38),
+    (50.15, 16.66), (50.60, 16.20), (50.75, 15.70), (50.87, 14.83), (51.15, 15.00), (51.50, 14.75), (52.10, 14.70),
+    (52.35, 14.56), (52.59, 14.65), (53.00, 14.15), (53.45, 14.25)])
+
+
+def in_poland(lat, lon):
+    """Whether (lat, lon) lies inside POLAND's coarse outline. Pure."""
+    if not (49.0 <= lat <= 54.9 and 14.1 <= lon <= 24.2):
+        return False
+    y, x = POLAND[:, 0], POLAND[:, 1]
+    y2, x2 = np.roll(y, -1), np.roll(x, -1)
+    cross = (y > lat) != (y2 > lat)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        xs = x + (lat - y) * (x2 - x) / (y2 - y)
+    return bool(np.count_nonzero(cross & (lon < xs)) % 2)
 
 
 def region_style(lat, lon):
@@ -425,6 +453,8 @@ def region_style(lat, lon):
         return STYLES["alpine"]
     if 56.0 <= lat <= 72.0 and 4.5 <= lon <= 32.0:              # Norway, Sweden, Finland (brick Copenhagen, Malmo: not)
         return STYLES["nordic"]
+    if in_poland(lat, lon):
+        return STYLES["poland"]
     if 46.0 <= lat <= 72.0 and -11.0 <= lon <= 32.0:
         return STYLES["europe_north"]
     if 30.0 <= lat < 46.0 and -10.0 <= lon <= 40.0:             # southern Europe, North Africa's coast, Levant

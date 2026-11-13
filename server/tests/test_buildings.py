@@ -67,6 +67,29 @@ class RegionStyleTest(unittest.TestCase):
         self.assertEqual(bld.brick_share(30.0, -90.0), 0.35)
         self.assertEqual(bld.brick_share(40.0, -110.0), 0.15)
 
+    def test_poland(self):
+        for lat, lon in ((52.2317, 21.0060), (50.06, 19.94), (54.52, 18.53), (53.43, 14.55), (51.11, 17.03),
+                         (50.04, 22.00), (53.13, 23.16), (49.30, 19.95)):     # Warsaw, Krakow, Gdynia, Szczecin, ...
+            self.assertEqual(bld.region_style(lat, lon).name, "poland", (lat, lon))
+        for lat, lon in ((52.52, 13.40), (50.08, 14.44), (54.71, 20.51), (49.84, 24.03), (54.69, 25.28),
+                         (48.15, 17.11), (51.05, 13.74)):     # Berlin, Prague, Kaliningrad, Lviv, Vilnius, ...
+            self.assertNotEqual(bld.region_style(lat, lon).name, "poland", (lat, lon))
+        hs = self.houses(52.206, 21.170)                # Warsaw, Wawer
+        brick = [h for h in hs if h.band is bld.BAND_BRICK]
+        self.assertLess(len(brick), 0.1 * len(hs), "little brick")
+        stucco = [h for h in hs if str(h.wall).startswith(bld.STUCCO)]
+        self.assertGreater(len(stucco), 0.6 * len(hs), "mostly plaster walls")
+        self.assertTrue(all(int(h.wall.split("|")[1]) <= 4 for h in stucco), "pale plaster, no bright paints")
+        self.assertFalse(any(str(h.wall).startswith(bld.SIDING) for h in hs), "no clapboard")
+        pitched = [h for h in hs if h.roof != "flat"]
+        self.assertTrue(0.75 * len(hs) < len(pitched) < 0.95 * len(hs))
+        self.assertTrue(all(h.pitch == 33.0 for h in pitched))
+        self.assertGreater(sum(h.roof == "hipped" for h in pitched), 0.3 * len(pitched))
+        block = bld.plan(np.array([[0, 0], [60, 0], [60, 12], [0, 12]], float), {"class": "apartments",
+                                                                                 "num_floors": 11},
+                         lat=52.24, lon=21.09)
+        self.assertEqual(block.roof, "flat")
+
     def test_south_asia_houses(self):
         hs = self.houses(28.61, 77.21)                  # Delhi, India
         self.assertFalse(any(h.porch for h in hs), "no American porches in South Asia")
