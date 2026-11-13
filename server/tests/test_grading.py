@@ -246,6 +246,45 @@ class AbutmentTest(unittest.TestCase):
         steady = 380.0 - 0.06 * d               # a road falling 6 % onto a bridge all the way: left alone
         self.assertIs(grading.fill_abutment(steady, False), steady)
 
+    def test_cut_keeps_the_grade_into_the_hill(self):
+        # the mirror, at a tunnel's portal (Warsaw's Trasa W-Z under Plac Zamkowy, 52.2465 N 21.0143 E): the map's
+        # tunnel begins 10 m behind the 11 m face its portal stands in
+        d = np.arange(0.0, 100.0, grading.PROFILE_STEP)
+        road = 94.0 - 0.01 * d                  # the road falling 1 % away from the portal
+        z = np.where(d < 10.0, 105.5, road)     # its last 10 m on top of the escarpment
+        cut = grading.cut_portal(z, False)
+        self.assertTrue(np.allclose(cut, road, atol=0.05), "the grade kept to the portal")
+        self.assertTrue(np.allclose(grading.cut_portal(z[::-1], True), cut[::-1]), "the same from the other end")
+        steady = 380.0 - 0.06 * d               # a road climbing 6 % to its tunnel all the way: left alone
+        self.assertIs(grading.cut_portal(steady, False), steady)
+        self.assertIs(grading.cut_portal(road, False), road)
+        down = np.where(d < 10.0, 90.0, road)   # a road dipping to its portal: not a hill's face, left alone
+        self.assertIs(grading.cut_portal(down, False), down)
+
+    def test_a_portal_mapped_behind_its_hills_face_is_at_the_foot_of_it(self):
+        """A tunnel under a plateau 11 m over the road, its map line beginning 10 m behind the plateau's vertical face
+        (the lidar's): the road stays level to the portal and the hill stays over the tube. The road climbed the face,
+        the portal's floor stood on the plateau and the tunnel was an open road across it (Warsaw, Trasa W-Z)."""
+        lines = [[(200, 0), (-30, 0)], [(-30, 0), (-250, 0)], [(-250, 0), (-400, 0)]]
+
+        def elev(la, lo):
+            e, _n, _ = FRAME.geodetic_to_enu(la, lo, 0.0)
+            return np.where(np.asarray(e) < -20.0, 21.0, 10.0)
+
+        def z_at(e):
+            g = grading.Grader(FRAME, FakeMD(features(lines, ["secondary"] * 3, flags=[(1, "is_tunnel")])), elev)
+            la, lo, _ = FRAME.enu_to_geodetic(np.array(e, float), np.zeros(len(e)), 0.0)
+            return g.apply(la, lo, elev(la, lo))
+        foot, lip, portal, over = (float(v) for v in z_at([0.0, -22.0, -29.0, -100.0]))
+        self.assertAlmostEqual(foot, 10.0, delta=0.1)
+        self.assertAlmostEqual(lip, 10.0, delta=0.2, msg="cut through the face's lip to the portal")
+        self.assertAlmostEqual(portal, 10.0, delta=0.2, msg="the portal's floor at the foot of the face")
+        self.assertAlmostEqual(over, 21.0, delta=0.1, msg="the hill over the tube, not cut open")
+        with unittest.mock.patch.object(grading, "PORTAL_CUT_ON", False):
+            foot, lip, portal, over = (float(v) for v in z_at([0.0, -22.0, -29.0, -100.0]))
+            self.assertGreater(lip, 15.0, "(BNE_PORTAL_CUT=off: up the face as before)")
+            self.assertGreater(portal, 19.0)
+
     def test_fill_sees_past_a_junction_by_the_bridge(self):
         # Kurna - Tuhala over Tallinna ringtee (59.3364 N 24.8239 E, GitHub #684): the map splits the road onto the
         # bridge at a junction 16 m before it. That piece alone had too few samples for the embankment's grade, its

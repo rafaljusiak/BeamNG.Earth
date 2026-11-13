@@ -460,6 +460,23 @@ ABUT_MIN_M = 0.3            # m: a smaller fill at the end is left out
 ABUT_MAX_M = 8.0            # m filled at most
 
 
+# Cuttings at portals: the mirror of the embankments at abutments. A tunnel's map line can begin a few metres inside the
+# hill, behind the face its portal stands in (Warsaw's Trasa W-Z under Plac Zamkowy, 52.2465 N 21.0143 E: the east
+# portal mapped 2-10 m behind the escarpment's 11 m wall in the lidar): the road's last metres climbed the face in the
+# elevation data, the portal's floor, taken from that ground, stood on top of the hill, and the tunnel under it was an
+# open trench through the square with a 13 % ramp of crumpled ground down the wall. A road ending at a tunnel whose
+# last PORTAL_NEAR_M rise much more steeply toward it than its own grade further on keeps that grade to its end
+# instead, as the cutting to a real portal does: the portal's floor (grade_points at the tunnel's ends,
+# roads.TunnelProfiles.ends) is at the foot of the face, the hill over the tube.
+PORTAL_CUT_ON = os.environ.get("BNE_PORTAL_CUT", "on") != "off"
+PORTAL_NEAR_M = 14.0        # m from the portal the road is checked ...
+PORTAL_FAR_M = 40.0         # ... against its grade from PORTAL_NEAR_M to this far
+PORTAL_STEEP = 0.15         # a rise this much steeper than that grade, near the end: the hill's face, not the road
+PORTAL_MIN_M = 1.0          # m: a smaller cut at the end is left out
+PORTAL_MAX_M = 25.0         # m cut at most
+PORTAL_TOUCH_M = 1.0        # m: a road's end this close to a tunnel range's end is at its portal
+
+
 def median_profile(z, step, width):
     """The running median of a profile sampled every `step` m over `width` m (the window shrunk evenly near the ends, so
     an end keeps its height). Pure."""
@@ -671,7 +688,7 @@ def field_heights(frame, elev, xy, r, sigma):
 
 
 def plan_roads(frame, parts, elev, abut=None, ext=None, pins=None, cuts=True, coarse=False, obs=None, decks=None,
-               rings=None):
+               rings=None, portal=None):
     """plan_road for many (lonlat, spec) parts with one elev call (its cost is per call); abut: per part (start, end)
     flags, the ends leading onto a bridge (fill_abutment); ext: per part (before, after), the lines (k, 2) in the frame
     from its start / end outward along the part the road goes on in (Grader._extensions), or None: their ground is in
@@ -680,7 +697,9 @@ def plan_roads(frame, parts, elev, abut=None, ext=None, pins=None, cuts=True, co
     part's samples (NaN where none) or None: they stand in for the DEM's (roadz.py, on coarse elevation: Grader._obs);
     decks: [(line (k, 2) in the frame, half width)] crossing over the roads, their ground read beside them
     (deck_capped; not on coarse elevation); rings: per part, True for a mapped roundabout's ring (roads.is_ring: not
-    banked, RING_LEVEL_ON). Pure given elev and obs."""
+    banked, RING_LEVEL_ON); portal(xy (m, 2) in the frame) -> which of the points are a tunnel's portal
+    (Grader._portal_fn), or None: the parts' ends there, and their extensions', are cut to it (cut_portal). Pure given
+    elev, obs and portal."""
     if not parts:
         return []
     ll = np.concatenate([lonlat for lonlat, _ in parts])
@@ -691,6 +710,9 @@ def plan_roads(frame, parts, elev, abut=None, ext=None, pins=None, cuts=True, co
         onto_xy = np.array([(E[i], N[i]) for j, (lonlat, _) in enumerate(parts) if len(lonlat)
                             for at_end, i in ((0, last[j] - len(lonlat) + 1), (1, last[j])) if abut[j][at_end]],
                            np.float64).reshape(-1, 2)
+    if not PORTAL_CUT_ON:
+        portal = None
+    ask = []                            # (the points asked of portal, all at once: its cost is per call)
     prof, k = [], 0
     for j, (lonlat, spec) in enumerate(parts):
         m = len(lonlat)
@@ -704,7 +726,10 @@ def plan_roads(frame, parts, elev, abut=None, ext=None, pins=None, cuts=True, co
         if len(xy) < 2:
             prof.append(None)
             continue
-        side, bank_side, onto = [], [], []
+        side, bank_side, onto, into = [], [], [], [None, None, None, None]
+        if portal is not None:          # (into: the part's own ends, then its extensions' far ends: indices into ask)
+            into[0], into[1] = len(ask), len(ask) + 1
+            ask += [xy[0], xy[-1]]
         for out in (ext[j] if ext is not None else (None, None)):
             if out is None or len(out) < 2:
                 side.append(np.zeros((0, 2)))
@@ -719,14 +744,18 @@ def plan_roads(frame, parts, elev, abut=None, ext=None, pins=None, cuts=True, co
                 if arc[-1] > reach + 1e-8:
                     out = np.vstack([np.asarray(out)[arc < reach], _point_along(out, reach)])
                     onto.append(False)
-                else:                   # (does it end where another part leads onto a bridge?)
+                else:                   # (does it end where another part leads onto a bridge? ... at a portal?)
                     onto.append(bool(len(onto_xy)) and
                                 float(np.hypot(*(onto_xy - np.asarray(out, np.float64)[-1]).T).min()) <= CHAIN_JOIN_M)
+                    if portal is not None:
+                        into[2 + len(onto) - 1] = len(ask)
+                        ask.append(np.asarray(out, np.float64)[-1])
                 side.append(resample(np.asarray(out, np.float64), step)[0][1:])
-        prof.append((xy, side[0][::-1], side[1], step, bank_side[0][::-1], bank_side[1], onto))
+        prof.append((xy, side[0][::-1], side[1], step, bank_side[0][::-1], bank_side[1], onto, into))
     pts = [np.concatenate([b, xy, a]) for xy, b, a, *_ in (p for p in prof if p is not None)]
     if not pts:
         return [None] * len(parts)
+    at_portal = np.asarray(portal(np.asarray(ask, np.float64).reshape(-1, 2)), bool).ravel() if ask else None
     allxy = np.concatenate(pts)
     if coarse:
         # coarse elevation (dem.coarse_at, GitHub #414): the median of the centre line and COARSE_SIDE_M to either side,
@@ -745,7 +774,7 @@ def plan_roads(frame, parts, elev, abut=None, ext=None, pins=None, cuts=True, co
         if pr is None:
             out.append(None)
             continue
-        xy, before, after, step, bank_before, bank_after, onto = pr
+        xy, before, after, step, bank_before, bank_after, onto, into = pr
         nb, na = len(before), len(after)
         zx = zall[k:k + nb + len(xy) + na]
         k += nb + len(xy) + na
@@ -770,6 +799,13 @@ def plan_roads(frame, parts, elev, abut=None, ext=None, pins=None, cuts=True, co
             for at_end, n_ext in ((False, nb), (True, na)):
                 if ab[int(at_end)] or (n_ext and onto[int(at_end)]):
                     zx = fill_abutment(zx, at_end, step)
+        if at_portal is not None:
+            # (the part's own end at a portal, nothing going on past it; or its extension's: the part on the other side
+            # of a junction by the portal is cut the same, so the two meet, as at an abutment)
+            for at_end, n_ext in ((False, nb), (True, na)):
+                q = into[2 + int(at_end)] if n_ext else None if ab[int(at_end)] else into[int(at_end)]
+                if q is not None and at_portal[q]:
+                    zx = cut_portal(zx, at_end, step)
         pin = pins[j] if pins is not None else (None, None)
         if pin[0] is not None and not nb and not ab[0]:     # (the end sample held: the smoothing keeps an end's height)
             zx = zx.copy()
@@ -1984,7 +2020,8 @@ class _Planner:
             coarse = COARSE_EASE_ON and self._coarse(key)
             for fid, part, cl, p in zip(ids, parts, clipped, plan_roads(self.frame, parts, self.elev, abut, ext, pins,
                                                                          coarse=coarse, obs=self._obs(key),
-                                                                         decks=self._decks_near(key), rings=rings)):
+                                                                         decks=self._decks_near(key), rings=rings,
+                                                                         portal=self._portal_fn(key))):
                 if p is not None:
                     p.rid = road_id(fid)
                     plans.append((fid, p))
@@ -2272,7 +2309,8 @@ class _Planner:
                 ext = self._extensions(parts, [asks[n][0][5] for n in jobs])
                 plans = plan_roads(self.frame, parts, self.elev, None, ext, cuts=False,
                                    coarse=COARSE_EASE_ON and self._coarse_ll(parts[0][0]),
-                                   obs=self._obs(None, parts[0][0]), decks=self._decks_ll(parts[0][0]))
+                                   obs=self._obs(None, parts[0][0]), decks=self._decks_ll(parts[0][0]),
+                                   portal=self._portal_fn(None))
                 for n, (part, last, whole), p in zip(jobs, preps, plans):
                     self._strong_keep(asks[n][0], keys[n], p, last, whole)
             except Exception as e:      # one at a time, each its own failure (_stronger_z)
@@ -2332,7 +2370,7 @@ class _Planner:
             p = plan_roads(self.frame, [(part, cand[4])], self.elev, None,
                            self._extensions([(part, cand[4])], [cand[5]]), cuts=False,
                            coarse=COARSE_EASE_ON and self._coarse_ll(part), obs=self._obs(None, part),
-                           decks=self._decks_ll(part))[0]
+                           decks=self._decks_ll(part), portal=self._portal_fn(None))[0]
             self._strong_keep(cand, k, p, last, whole)
         except Exception as e:      # not held rather than no grading
             log.debug("grading: pin height of %s: %s: %s", cand[5], type(e).__name__, e)
@@ -3386,15 +3424,36 @@ class _Planner:
             np_.steep = getattr(p, "steep", False)
             plans[n] = (fid, np_)
 
-    def _abut_ends(self, key, pe, ok=None):
+    def _portal_fn(self, key):
+        """plan_roads' portal: which of the points xy (m, 2) are a tunnel's portal (within PORTAL_TOUCH_M of a tunnel
+        range's end in their own cell); key: the cell planned, only the points near it looked at (as _abut_ends), or
+        None: every point (a pin height's part, _stronger_z: its ends' cells are read for its extensions anyway, and
+        the same part must come out the same whichever end is asked). None with PORTAL_CUT_ON off."""
+        if not PORTAL_CUT_ON:
+            return None
+
+        def portal(xy):
+            xy = np.asarray(xy, np.float64).reshape(-1, 2)
+            try:
+                return self._abut_ends(key, xy, what="portals")
+            except Exception as e:      # no cuts rather than no grading
+                log.debug("grading: portals of %s: %s: %s", key, type(e).__name__, e)
+                return np.zeros(len(xy), bool)
+        return portal
+
+    def _abut_ends(self, key, pe, ok=None, what="ends"):
         """Which of the points pe (n, 2) (road ends; ok: those to look at) near cell key are within APPROACH_TOUCH_M
-        of a bridge's end in their own cell."""
+        of a bridge's end in their own cell (what "portals": of a tunnel's end, its portal, within PORTAL_TOUCH_M; key
+        None: every point looked at)."""
         la, lo, _ = self.frame.enu_to_geodetic(pe[:, 0], pe[:, 1], 0.0)
         la, lo = np.asarray(la, np.float64), np.asarray(lo, np.float64)
-        lon0, lat0, lon1, lat1 = (float(v) for v in key.bounds())
-        dla = np.maximum(np.maximum(lat0 - la, la - lat1), 0.0) * 111320.0
-        dlo = np.maximum(np.maximum(lon0 - lo, lo - lon1), 0.0) * 111320.0 * np.cos(np.radians(la))
-        touch = np.hypot(dla, dlo) <= APPROACH_CELL_M
+        if key is None or not hasattr(key, "bounds"):
+            touch = np.ones(len(la), bool)
+        else:
+            lon0, lat0, lon1, lat1 = (float(v) for v in key.bounds())
+            dla = np.maximum(np.maximum(lat0 - la, la - lat1), 0.0) * 111320.0
+            dlo = np.maximum(np.maximum(lon0 - lo, lo - lon1), 0.0) * 111320.0 * np.cos(np.radians(la))
+            touch = np.hypot(dla, dlo) <= APPROACH_CELL_M
         if ok is not None:
             touch &= ok
         homes = {}
@@ -3402,13 +3461,13 @@ class _Planner:
         for j, home in zip(tj.tolist(), mapcells.cells_of(la[tj], lo[tj])):
             homes.setdefault(home, []).append(j)
         for home, js in homes.items():
-            ends = self._cell_enu(home, ground=False)["ends"]
+            ends = self._cell_enu(home, ground=False)[what]
             js = np.asarray(js)
             if not len(ends):
                 touch[js] = False
                 continue
             d = np.hypot(pe[js, None, 0] - ends[None, :, 0], pe[js, None, 1] - ends[None, :, 1])
-            touch[js] = (d <= APPROACH_TOUCH_M).any(axis=1)
+            touch[js] = (d <= (PORTAL_TOUCH_M if what == "portals" else APPROACH_TOUCH_M)).any(axis=1)
         return touch
 
     def _end_raised(self, xy):
@@ -3540,6 +3599,20 @@ class _Planner:
                         lv = float(blv[j]) if kind == "bridge" and j < len(blv) else 0.0
                         if len(ring) >= 2 and (kk not in parts or len(ring) > len(parts[kk][0])):
                             parts[kk] = (ring, sp, lv)
+        # the tunnels' ends (the map's ranges, where the roads' ground parts end: not roads.tunnel_parts' longer ones)
+        portal_ll = []
+        if PORTAL_CUT_ON and f is not None and len(f):
+            ts = roadsmod.tunnel_specs(f)
+            for i in range(len(f)):
+                if ts[i] is not None:
+                    for ring in roadsmod._parts_by_level(f, i, "tunnel"):
+                        if len(ring) >= 2:
+                            portal_ll += [ring[0], ring[-1]]
+        portals = np.zeros((0, 2))
+        if portal_ll:
+            pl = np.asarray(portal_ll, np.float64)[:, :2]
+            pe_, pn_, _ = self.frame.geodetic_to_enu(pl[:, 1], pl[:, 0], 0.0)
+            portals = np.stack([np.asarray(pe_, np.float64), np.asarray(pn_, np.float64)], axis=1)
         # the rail bridges (railways.DRAWN lines' bridge pieces): the roads under them dip as under a road overpass
         # (_lower_underpasses), nothing else (no ramps, no abutments: a line's deck is never raised for a road).
         # (GitHub #311 / #345 / #364: the track lay across the road under a rail bridge)
@@ -3601,7 +3674,7 @@ class _Planner:
                 k0 += len(ring)
         return {"bridges": bridges, "bridge_cls": bcls, "bridge_ids": bids, "bridge_levels": blevels,
                 "bridge_half": bhalf, "ground": ground_l, "ground_ids": ground_ids,
-                "end_of": end_of, "span_bridges": span_xy,
+                "end_of": end_of, "span_bridges": span_xy, "portals": portals,
                 "ends": np.asarray(ends, np.float64).reshape(-1, 2), "rail_bridges": rail_xy, "rail_ground": rail_gxy}
 
     def _decks_ll(self, lonlat):
@@ -5043,6 +5116,27 @@ def fill_abutment(z, at_end, step=PROFILE_STEP):
         return z
     q = p.copy()
     q[:n] = np.minimum(np.maximum(p[:n], e), p[:n] + ABUT_MAX_M)
+    return q[::-1] if at_end else q
+
+
+def cut_portal(z, at_end, step=PROFILE_STEP):
+    """The raw profile z (a sample every step m) of a road ending at a tunnel's portal at its first (at_end False) or
+    last sample, its last PORTAL_NEAR_M cut down to the straight grade of the stretch from there to PORTAL_FAR_M where
+    they rise at least PORTAL_STEEP more steeply than it toward the portal (PORTAL_CUT_ON; fill_abutment's mirror).
+    Returns z itself when nothing is cut. Pure."""
+    z = np.asarray(z, np.float64)
+    p = z[::-1] if at_end else z
+    d = np.arange(len(p)) * step
+    far = (d >= PORTAL_NEAR_M) & (d <= PORTAL_FAR_M)
+    if far.sum() < 4:
+        return z
+    b, a = np.polyfit(d[far], p[far], 1)
+    n = int((d < PORTAL_NEAR_M).sum())
+    e = a + b * d[:n]
+    if p[0] - e[0] < PORTAL_MIN_M or (b - np.diff(p[:n + 1]) / step).max() < PORTAL_STEEP:
+        return z
+    q = p.copy()
+    q[:n] = np.maximum(np.minimum(p[:n], e), p[:n] - PORTAL_MAX_M)
     return q[::-1] if at_end else q
 
 
