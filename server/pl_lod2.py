@@ -1,6 +1,6 @@
 """Poland's official 3D buildings (GUGiK's CityGML LoD2 models) in place of the map's extruded footprints.
 
-BNE_PL_LOD2=on (off by default). Where the bundled index (data/pl_lod2_sheets.json.gz, tools/build_pl_lod2_index.py)
+On by default; BNE_PL_LOD2=off turns it off. Where the bundled index (data/pl_lod2_sheets.json.gz, tools/build_pl_lod2_index.py)
 has a model sheet for the place, a road tile's buildings are GUGiK's: their real footprints, heights and roof shapes
 (2015-2018, from 2012 airborne laser scanning; 236 of Poland's 380 powiats: ten whole voivodeships and Silesia's
 cities, Warsaw among them). Everywhere in Poland, the map's footprints without a height take LoD1 2024's (heights()):
@@ -40,7 +40,7 @@ import numpy as np
 
 log = logging.getLogger("earthd.pl_lod2")
 
-ON = os.environ.get("BNE_PL_LOD2", "off").lower() in ("on", "1", "true", "yes")
+ON = os.environ.get("BNE_PL_LOD2", "on").lower() in ("on", "1", "true", "yes")
 FORMAT = 1                  # the parsed sheets' layout (bump on a change: the cache's subdirectory)
 LOD2, LOD1 = "lod2", "lod1"
 INDEXES = {d: os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", f"pl_{d}_sheets.json.gz")

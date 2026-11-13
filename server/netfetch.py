@@ -273,7 +273,7 @@ POLICIES = {
     "nvdbapiles.atlas.vegvesen.no": HostPolicy(rate=2.0, burst=4.0, max_conc=2, daily_budget=3000, daily_hard=6000,
                                                allow_prefetch=True, offline_ok=True, miss_ttl=None, timeout=30.0,
                                                max_attempts=3, base_delay=2.0, optional=True),
-    # GUGiK's 3D building models of Poland (pl_lod2.py, BNE_PL_LOD2=on): one Range request per 1:5,000 sheet (its entry
+    # GUGiK's 3D building models of Poland (pl_lod2.py, on unless BNE_PL_LOD2=off): one Range request per 1:5,000 sheet (its entry
     # in the powiat's zip, ~0.1-3 MB), parsed once and kept on disk; a government host with no published limits: modest
     "opendata.geoportal.gov.pl": HostPolicy(rate=2.0, burst=4.0, max_conc=2, daily_budget=2000, daily_hard=4000,
                                             allow_prefetch=True, offline_ok=True, miss_ttl=30 * DAY, binary=True,

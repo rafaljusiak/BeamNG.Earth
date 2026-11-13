@@ -5,7 +5,7 @@ that has models, the powiats (TERYT codes) whose zip holds a file for it, and th
 compressed and full size, CRC-32, compression method), as published at
 `https://opendata.geoportal.gov.pl/InneDane/Budynki3D/LOD2/<TERYT>_gml.zip` (read 2026-11-13: 236 powiats, 38,913
 sheets). It holds no model data: the server downloads a sheet's file when a player first drives near it
-(`server/pl_lod2.py`, `BNE_PL_LOD2=on`).
+(`server/pl_lod2.py`, on by default, `BNE_PL_LOD2=off` to turn off).
 
 The models: Główny Urząd Geodezji i Kartografii (GUGiK), "Modele 3D budynków",
 https://www.geoportal.gov.pl/pl/dane/inne-dane/modele-3d-budynkow/ , licensed CC BY 4.0. Attribution: "GUGiK 3D
