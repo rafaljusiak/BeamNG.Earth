@@ -8463,8 +8463,6 @@ def deck_pads(decks, ground_roads, box, ground_fn, own=True):
     joints = []
     for nd, incident in sorted(inc.items()):
         q = nodes[nd]
-        if own and not box_owns(box, float(q[0]), float(q[1])):
-            continue
         groups = _pad_height_groups(incident)
         for line, half in gl:
             for at in (0, -1):
@@ -8486,6 +8484,9 @@ def deck_pads(decks, ground_roads, box, ground_fn, own=True):
                     if matches:
                         groups[min(matches)[1]].append((ln, zz, half))
         joints.extend((q, parts) for parts in groups)
+    surfaces = [(np.asarray(xy, np.float64)[:, :2], np.asarray(z, np.float64), spec.width / 2)
+                for _fid, spec, xy, z in decks if len(xy) >= 2 and np.isfinite(np.asarray(z, np.float64)).all()]
+    made = []                                   # (hull, centre, rim) of each pad, then their rims' railings
     for q, parts in joints:
         if len(parts) < 2:
             continue
@@ -8510,10 +8511,22 @@ def deck_pads(decks, ground_roads, box, ground_fn, own=True):
         rim = np.asarray(fast._ef.deck_pad_rim(np.ascontiguousarray(hull), pts, off, halves, PAD_RIM_STEP_M,
                                                PAD_FORK_OPEN_M if margin == PAD_FORK_MARGIN_M else PAD_OPEN_M),
                          np.float64)
+        made.append((hull, np.array([q[0], q[1], zc]), rim))
+    for n, (hull, centre, rim) in enumerate(made):
+        if own and not box_owns(box, float(centre[0]), float(centre[1])):
+            continue                            # (after every joint's pad is made: the others bound its railings)
         walls = []
         if len(rim):
             drop = rim[:, 2] - np.asarray(ground_fn(rim[:, :2]), np.float64)
             wall = (rim[:, 5] < 0.5) & (drop >= PAD_WALL_DROP_M)
+            # none where the paving goes on past the rim: on another deck's carriageway, or inside another joint's
+            # pad. A junction of many short links on decks (Warsaw, Aleja Niepodleglosci over the Trasa Lazienkowska's
+            # 65 m tunnel, 52.2172 N 21.0051 E: eight joints within 30 m, bridged as an underpass's cover) had each
+            # pad's railing where the ground lay 7 m under it, across the lanes of the decks beside it
+            if wall.any():
+                wall &= ~_on_decks(rim[:, :3], surfaces)
+            if wall.any() and len(made) > 1:
+                wall &= ~pad_inside([m for k, m in enumerate(made) if k != n], rim[:, :2], z=rim[:, 2])
             # runs round the ring (one closing over its start joined)
             k = len(rim)
             if wall.all():
@@ -8531,8 +8544,29 @@ def deck_pads(decks, ground_roads, box, ground_fn, own=True):
                         run = []
                 if len(run) >= 2:
                     walls.append((rim[run, :3], rim[run, 3:5]))
-        out.append((hull, np.array([q[0], q[1], zc]), walls))
+        out.append((hull, centre, walls))
     return out
+
+
+def _on_decks(pts, surfaces, dz=None):
+    """Which points (k, 3) lie on a deck's carriageway: within the half width of one of surfaces [(centre line (m, 2),
+    z (m,), half width)], at its height there (within dz, default PAD_JOIN_Z_M: a deck passing over or under is not
+    the paving going on). Pure."""
+    pts = np.asarray(pts, np.float64).reshape(-1, 3)
+    dz = PAD_JOIN_Z_M if dz is None else dz
+    on = np.zeros(len(pts), bool)
+    for xy, z, half in surfaces:
+        if (pts[:, 0].max() < xy[:, 0].min() - half or pts[:, 0].min() > xy[:, 0].max() + half or
+                pts[:, 1].max() < xy[:, 1].min() - half or pts[:, 1].min() > xy[:, 1].max() + half):
+            continue
+        a, d = xy[:-1], np.diff(xy, axis=0)
+        t = np.clip(((pts[:, None, :2] - a[None]) * d[None]).sum(2) / np.maximum((d * d).sum(1), 1e-12)[None], 0.0, 1.0)
+        dist = np.hypot(*(a[None] + t[..., None] * d[None] - pts[:, None, :2]).transpose(2, 0, 1))
+        j = np.argmin(dist, axis=1)
+        k = np.arange(len(pts))
+        zs = z[j] + t[k, j] * (z[j + 1] - z[j])
+        on |= (dist[k, j] <= half) & (np.abs(zs - pts[:, 2]) <= dz)
+    return on
 
 
 def pad_inside(pads, xy, shrink=0.3, z=None):

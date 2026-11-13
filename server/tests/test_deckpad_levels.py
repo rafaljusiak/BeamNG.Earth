@@ -102,5 +102,61 @@ class DeckPadLevelsTest(unittest.TestCase):
         self.assertTrue(roads.pad_inside([pad], xy).all(), 'legacy XY-only query stays available')
 
 
+@unittest.skipUnless(fast.AVAILABLE and getattr(fast._ef, "VERSION", 0) >= 113,
+                     "earthfast 113 (deck_pad_rim)")
+class DeckPadRimOnPavingTest(unittest.TestCase):
+    """A pad's rim has no railing where the paving goes on: on another deck's carriageway, inside another pad
+    (Warsaw, Aleja Niepodleglosci over the Trasa Lazienkowska's tunnel: a ring of short links on decks)."""
+
+    @staticmethod
+    def deck(fid, a, b, z=20.0, width=8.0):
+        return (fid, SimpleNamespace(width=width), np.array([a, b], dtype=np.float64), np.array([z, z]))
+
+    @staticmethod
+    def pads(decks):
+        return roads.deck_pads(decks, (), (-200.0, -200.0, 200.0, 200.0), lambda xy: np.zeros(len(xy)))
+
+    @staticmethod
+    def wall_points(pad):
+        return np.concatenate([w[0] for w in pad[2]]) if pad[2] else np.zeros((0, 3))
+
+    def tee(self):
+        return [self.deck("w", [0.0, 0.0], [-40.0, 0.0]), self.deck("e", [0.0, 0.0], [10.0, 0.0]),
+                self.deck("n", [0.0, 0.0], [0.0, 40.0])]
+
+    def test_a_lone_junction_keeps_its_railings(self):
+        pads = self.pads(self.tee())
+        self.assertEqual(len(pads), 1)
+        self.assertGreater(len(self.wall_points(pads[0])), 4)
+
+    def test_no_railing_on_the_deck_beside_or_in_the_next_pad(self):
+        # two T junctions 10 m apart on one street: each pad's rim reaches the other's stem and pad
+        decks = self.tee() + [self.deck("e2", [10.0, 0.0], [50.0, 0.0]), self.deck("s", [10.0, 0.0], [10.0, -40.0])]
+        pads = self.pads(decks)
+        self.assertEqual(len(pads), 2)
+        surfaces = [(d[2], d[3], d[1].width / 2) for d in decks]
+        for n, pad in enumerate(pads):
+            pts = self.wall_points(pad)
+            self.assertGreater(len(pts), 2, "the outer rim over the drop keeps its railing")
+            self.assertFalse(roads._on_decks(pts, surfaces).any(), "a railing across a deck's lanes")
+            self.assertFalse(roads.pad_inside([pads[1 - n]], pts[:, :2], z=pts[:, 2]).any(),
+                             "a railing inside the next pad")
+        alone = self.pads(self.tee())[0]
+        self.assertLess(len(self.wall_points(pads[0])), len(self.wall_points(alone)))
+
+    def test_a_deck_passing_under_takes_no_railing_away(self):
+        tee = self.tee()
+        under = self.deck("under", [-6.0, -40.0], [-6.0, 40.0], z=12.0)
+        want = self.wall_points(self.pads(tee)[0])
+        got = [p for p in self.pads(tee + [under]) if abs(p[1][2] - 20.0) < 0.1]
+        self.assertEqual(len(got), 1)
+        np.testing.assert_allclose(self.wall_points(got[0]), want)
+
+    def test_on_decks_is_by_width_and_height(self):
+        s = [(np.array([[0.0, 0.0], [20.0, 0.0]]), np.array([10.0, 12.0]), 4.0)]
+        pts = np.array([[10.0, 3.9, 11.0], [10.0, 4.1, 11.0], [10.0, 0.0, 12.0], [10.0, 0.0, 5.0], [25.0, 0.0, 12.0]])
+        self.assertEqual(roads._on_decks(pts, s).tolist(), [True, False, False, False, False])
+
+
 if __name__ == "__main__":
     unittest.main()
