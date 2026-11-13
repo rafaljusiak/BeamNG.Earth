@@ -244,7 +244,7 @@ def feature_ids(conn):
             if pl_lod2.ON:
                 dlat = FEATURE_NEAR_M / 110540.0
                 dlon = FEATURE_NEAR_M / (111320.0 * max(0.1, math.cos(math.radians(lat))))
-                if pl_lod2.covered(lat - dlat, lon - dlon, lat + dlat, lon + dlon):
+                if pl_lod2.covered(lat - dlat, lon - dlon, lat + dlat, lon + dlon, pl_lod2.LOD1):
                     ids.add("model:gugik_lod2")
         except Exception:
             pass

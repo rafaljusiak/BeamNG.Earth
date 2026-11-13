@@ -82,6 +82,25 @@ def citygml(blds):
 FIXTURE = citygml([_building("H1", 1030, house()), _building("B1", 1130, block())])
 
 
+def lod1_building(bid, x, y, w, d, h, z=100.0, roof=1000):
+    """A LoD1 block as GUGiK writes it: a solid of a bottom face, walls and a top, its measured height."""
+    def face(pts):
+        return f"<gml:surfaceMember><gml:Polygon><gml:exterior>{_poly(pts)}</gml:exterior></gml:Polygon></gml:surfaceMember>"
+    c = [(x, y), (x, y + d), (x + w, y + d), (x + w, y)]
+    faces = [face([(a, b, z) for a, b in c]), face([(a, b, z + h) for a, b in c[::-1]])]
+    for (a, b), (a2, b2) in zip(c, c[1:] + c[:1]):
+        faces.append(face([(a, b, z), (a2, b2, z), (a2, b2, z + h), (a, b, z + h)]))
+    return (f"<core:cityObjectMember><bldg:Building gml:id=\"g_{bid}\"><gen:stringAttribute name=\"buildingId\">"
+            f"<gen:value>{bid}</gen:value></gen:stringAttribute><bldg:roofType>{roof}</bldg:roofType>"
+            f"<bldg:measuredHeight uom=\"meter\">{h}</bldg:measuredHeight><bldg:lod1Solid><gml:Solid><gml:exterior>"
+            f"<gml:CompositeSurface>{''.join(faces)}</gml:CompositeSurface></gml:exterior></gml:Solid></bldg:lod1Solid>"
+            f"</bldg:Building></core:cityObjectMember>")
+
+
+LOD1_FIXTURE = citygml([lod1_building("L1", 0, 0, 10, 8, 7.5, roof=1030), lod1_building("L2", 40, 0, 20, 20, 16.0),
+                        lod1_building("L3", -60, -60, 12, 10, 14.0)])
+
+
 class FakeFetcher:
     """Range requests of one in-memory zip; counts its requests."""
 
@@ -213,7 +232,7 @@ class FetchTest(unittest.TestCase):
         data, entry = zipped("Modele_3D/1465_N-34-139-A-c-1-1.gml", FIXTURE)
         f = FakeFetcher(data)
         idx = {"base": "https://x/", "zips": {}, "sheets": {"N-34-139-A-c-1-1": [entry]}}
-        with unittest.mock.patch.object(P, "index", lambda: idx):
+        with unittest.mock.patch.object(P, "index", lambda *a: idx):
             s = P.Source(self.tmp, f).sheet("N-34-139-A-c-1-1")
             self.assertEqual(s.n, 2)
             s2 = P.Source(self.tmp, FakeFetcher(b"", fail=True)).sheet("N-34-139-A-c-1-1")
@@ -311,6 +330,65 @@ class MeshTest(unittest.TestCase):
         t = PM.triangulate(ring)
         u, w = ring[t[:, 1]] - ring[t[:, 0]], ring[t[:, 2]] - ring[t[:, 0]]
         self.assertAlmostEqual((u[:, 0] * w[:, 1] - u[:, 1] * w[:, 0]).sum() / 2, 400 - 18, places=6)
+
+
+class Lod1Test(unittest.TestCase):
+    """LoD1 2024: footprints and measured heights for the map's footprints that have none (pl_lod2.parse1, _Lod1)."""
+
+    def setUp(self):
+        self.frame = geodesy.EnuFrame(LAT, LON)
+        s = P.Sheet("X", P.pack1(P.parse1([LOD1_FIXTURE[i:i + 500] for i in range(0, len(LOD1_FIXTURE), 500)])))
+        rows = np.arange(s.n)
+        pts = s.a["fp"].astype(np.float64) + s.origin
+        la, lo = P.from_puwg92(pts[:, 0], pts[:, 1])
+        x, y, _ = self.frame.geodetic_to_enu(la, lo, np.zeros(len(la)))
+        off = s.a["fp_off"]
+        xy = np.c_[x, y]
+        self.blds = [(xy[off[i]:off[i + 1]], float(s.a["height"][i]), int(s.a["roof"][i])) for i in rows]
+
+    def test_parse(self):
+        self.assertEqual([h for _, h, _ in self.blds], [7.5, 16.0, 14.0])
+        self.assertAlmostEqual(abs(bld._area2(self.blds[0][0])) / 2, 80.0, delta=0.5, msg="the bottom face")
+        self.assertEqual([t for _, _, t in self.blds], [1030, 1000, 1000])
+
+    def test_index_and_urls(self):
+        self.assertEqual(P.zip_url(P.index(P.LOD1), "1465"),
+                         "https://opendata.geoportal.gov.pl/InneDane/Budynki3D/LOD1/2024/14/1465.zip")
+        self.assertEqual(P.zip_url(P.index(P.LOD2), "1465"),
+                         "https://opendata.geoportal.gov.pl/InneDane/Budynki3D/LOD2/1465_gml.zip")
+        self.assertEqual(len(P.index(P.LOD1)["zips"]), 380, "every powiat")
+        self.assertTrue(P.covered(51.11, 17.03, 51.12, 17.04, P.LOD1), "Wroclaw: LoD1 ...")
+        self.assertFalse(P.covered(51.11, 17.03, 51.12, 17.04, P.LOD2), "... but no LoD2")
+        self.assertTrue(P.covered(50.26, 19.02, 50.27, 19.03, P.LOD2), "Katowice (city powiat 2469)")
+
+    def items(self, feats):
+        from test_buildings import Feats
+
+        def ll(x, y, w, d):
+            e = np.array([x, x + w, x + w, x, x]); n = np.array([y, y, y + d, y + d, y])
+            la, lo, _ = self.frame.enu_to_geodetic(e, n, 0.0)
+            return np.stack([lo, la], 1)
+        ids, boxes, cls, h, nf = zip(*feats)
+        b = Feats(list(ids), [ll(*bx) for bx in boxes], **{"class": list(cls), "height": list(h),
+                                                           "num_floors": list(nf)})
+        items = bld.tile_buildings(self.frame, -128, -128, 128, 128, [b], lambda la, lo: np.zeros(np.shape(la)),
+                                   lod1=self.blds)
+        return {s.seed: s for s, _, _ in items}, {f[0]: bld._hash01(f[0], "plan") for f in feats}
+
+    def test_heights(self):
+        got, seed = self.items([("house", (0.2, 0.1, 9.6, 7.8), "house", np.nan, np.nan),
+                                ("block", (40, 0, 20, 20), "apartments", np.nan, 5.0),
+                                ("misfit", (-60, -60, 12, 10), "apartments", np.nan, 1.0),
+                                ("mapped", (40.5, 0.5, 5, 5), "", 30.0, np.nan),
+                                ("new", (100, 100, 10, 10), "house", np.nan, np.nan)])
+        self.assertAlmostEqual(got[seed["house"]].height, 7.5, places=3, msg="measured: the eaves, no roof rise off")
+        self.assertNotEqual(got[seed["house"]].roof, "flat")
+        self.assertAlmostEqual(got[seed["block"]].height, 16.0, places=3, msg="fits its 5 mapped floors")
+        self.assertEqual(got[seed["block"]].floors, 5)
+        self.assertEqual(got[seed["block"]].roof, "flat")
+        self.assertLess(got[seed["misfit"]].height, 6.0, "14 m does not fit 1 mapped floor: the floor kept")
+        self.assertAlmostEqual(got[seed["mapped"]].height, 30.0, places=3, msg="a mapped height kept")
+        self.assertNotIn(got[seed["new"]].height, (7.5, 16.0, 14.0), "outside LoD1: guessed")
 
 
 class TileTest(unittest.TestCase):

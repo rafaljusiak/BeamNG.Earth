@@ -777,7 +777,7 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
             h = max(2.5, h - dome_rise(roof, hw, attrs.get("roof_height")))
         elif attrs.get("roof_height") and np.isfinite(attrs["roof_height"]) and roof != "flat":
             h = max(2.5, h - float(attrs["roof_height"]))
-        elif roof != "flat" and not lod2:
+        elif roof != "flat" and not (lod2 or attrs.get("height_eave")):
             h = max(2.5, h - roof_rise(roof, hw, style.pitch or PITCH.get(roof, PITCH["gabled"])))
         if nf is None:
             # a church: one tall storey (Cluj's St. Michael's, 25 m, came out as three 8 m floors)
@@ -2733,6 +2733,81 @@ def _outline_under_parts(at, bparts):
     return bool(own) and all(p[1] is None or p[1][1] <= PARTS_GROUND_M for p in bparts)
 
 
+LOD1_COVER = 0.5           # a footprint this much inside LoD1's buildings takes their measured height
+LOD1_SAMPLES = 40
+LOD1_STOREY_M = (2.5, 4.5)  # m a storey: a measured height fits a footprint's mapped floors (and 1.5 m of roof)
+LOD1_FLAT_ROOF = 1000       # (GUGiK's roof type code: flat)
+LOD1_MARGIN_M = 60.0        # m round a tile LoD1's buildings are asked for (the footprints whose centre is in it reach out)
+
+
+class _Lod1:
+    """LoD1 2024's buildings round a tile (pl_lod2.heights: rings shifted into the tile's frame, measured heights, roof
+    types): height(ring) gives a map footprint the height of the LoD1 buildings it lies in (LOD1_COVER of grid points
+    inside it), their mean weighted by the area in each, and the roof type of the one with the most, or None. The
+    measured height lies between a building's eaves and its top (against LoD2 at Warsaw's centre: the eaves +0.2 m on
+    flat roofs, +1-1.6 m on pitched ones), so plan() takes it as the eaves (height_eave); a tower on a podium comes out
+    low (the Palace of Culture: 85 m), so a mapped height is kept."""
+
+    def __init__(self, blds, x0, y0):
+        d = np.array([x0, y0], np.float64)
+        self.rings = [r - d for r, _, _ in blds]
+        self.h = np.array([h for _, h, _ in blds], np.float64)
+        self.roof = [t for _, _, t in blds]
+        self.box = np.array([(*r.min(0), *r.max(0)) for r in self.rings], np.float64).reshape(-1, 4)
+        self.paths = {}
+
+    def height(self, ring):
+        from polygon import Path
+        lo, hi = ring.min(0), ring.max(0)
+        b = self.box
+        near = np.flatnonzero((b[:, 2] >= lo[0]) & (b[:, 0] <= hi[0]) & (b[:, 3] >= lo[1]) & (b[:, 1] <= hi[1]))
+        if not len(near):
+            return None
+        area = abs(_area2(ring)) / 2
+        step = max(math.sqrt(max(area, 1e-6) / LOD1_SAMPLES), 0.25)
+        gx, gy = np.meshgrid(np.arange(lo[0] + step / 2, hi[0], step), np.arange(lo[1] + step / 2, hi[1], step))
+        g = np.stack([gx.ravel(), gy.ravel()], 1)
+        g = g[Path(ring).contains_points(g)] if len(g) else g
+        if not len(g):
+            g = ring.mean(0)[None]
+        hit = np.zeros(len(g), bool)
+        per = []
+        for k in near:
+            k = int(k)
+            p = self.paths.get(k)
+            if p is None:
+                p = self.paths[k] = Path(self.rings[k])
+            h = np.asarray(p.contains_points(g), bool) & ~hit
+            if h.any():
+                per.append((k, int(h.sum())))
+                hit |= h
+        if hit.mean() < LOD1_COVER or not per:
+            return None
+        w = np.array([c for _, c in per], np.float64)
+        hs = self.h[[k for k, _ in per]]
+        top = max(per, key=lambda kc: kc[1])[0]
+        return float((hs * w).sum() / w.sum()), self.roof[top]
+
+
+def lod1_heights(frame, x0, y0, x1, y1, md, kind="demand"):
+    """LoD1 2024's buildings round the tile (pl_lod2.heights) when BNE_PL_LOD2 is on, else None; a sheet that could not
+    be had marks the build incomplete (revisit.fault) and the tile keeps its guessed heights."""
+    import pl_lod2
+    if not pl_lod2.ON or md is None:
+        return None
+    try:
+        return pl_lod2.heights(frame, x0, y0, x1, y1, md.cache_dir, md.fetcher, kind=kind, margin=LOD1_MARGIN_M) or None
+    except pl_lod2.Unavailable as e:
+        import logging
+        import revisit
+        logging.getLogger("earthd.buildings").warning("LoD1 heights unavailable, guessed heights instead: %s", e)
+        revisit.fault()
+    except Exception:
+        import logging
+        logging.getLogger("earthd.buildings").warning("LoD1 heights failed, guessed heights instead", exc_info=True)
+    return None
+
+
 LOD2_COVER = 0.5           # a map footprint this much inside GUGiK's models is left out (they stand there)
 LOD2_MARGIN_M = 60.0       # m round a tile the map's footprints are looked at for its models' attributes
 LOD2_SAMPLES = 120         # about this many grid points inside a footprint (its share inside models)
@@ -2885,7 +2960,7 @@ def _block_colours(items):
 def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=(), west_town=False, roads_xy=None,
                    tunnels_xy=None, garages_xy=None, supports=None, bridges_xy=None, water_xy=None, decks=None,
                    ml_roads_xy=None, ways_xy=None, skip=frozenset(), min_size=None, own=None, house_land_layers=(),
-                   lod2_models=None):
+                   lod2_models=None, lod1=None):
     """[(Spec, gmin, gmax)] of the buildings whose footprint centroid is in the tile [x0, x1) x [y0, y1) (own: the
     tile's box when it says which points are its own, roads.box_owns: a geotile's)
     (anchor frame), rings relative to (x0, y0). layers: mapgeom.Features of buildings (one per map cell; a
@@ -2900,8 +2975,11 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
     footprint m²): only buildings at least that tall or that large (the skyline tiles: skyline_tile), tested before
     any other work on a building. lod2_models: GUGiK's models round the tile (pl_lod2.models, the anchor frame; None:
     none asked): the tile's own (their outline's centre in it) are drawn as modelled, and the map's footprints mostly
-    inside models are left out, lending them their attributes (_Lod2)."""
+    inside models are left out, lending them their attributes (_Lod2). lod1: LoD1 2024's footprints and heights round
+    the tile (pl_lod2.heights, the anchor frame; None: none asked): a footprint without a mapped height takes theirs
+    (_Lod1)."""
     lod2 = _Lod2(lod2_models, x0, y0) if lod2_models else None
+    lod1 = _Lod1(lod1, x0, y0) if lod1 else None
     parts_of = _PartsOf(frame, part_layers)     # building id -> [(ring in the anchor frame, (own height, bottom))]
     seen = set()
     rings, attrs, looks, mins = [], [], [], []
@@ -2976,6 +3054,19 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
             if hh_ is not None and np.isfinite(hh_) and 0 < hh_ < FLAT_FOOTPRINT_M and not parts_of.get(str(key)):
                 continue                # a mapped area, not a building (the Golden Gate toll plaza's 0.01 m footprint
                                         # drew a slab with a rim round the booths, 2026-10-21)
+            nf_ = at.get("num_floors")
+            nf_ = float(nf_) if nf_ is not None and np.isfinite(nf_) and nf_ > 0 else None
+            if lod1 is not None and (hh_ is None or not np.isfinite(hh_) or hh_ <= 0):
+                got = lod1.height(np.stack([e[:-1] - x0, n[:-1] - y0], 1))
+                # (with floors mapped, only a height that fits them, LOD1_STOREY_M a storey: LoD1 has one height per
+                # BDOT building, and a stepped block of 11-18 storeys and its one-storey annexes are one 39.5 m box)
+                if got is not None and nf_ is not None and not (
+                        LOD1_STOREY_M[0] * nf_ <= got[0] <= LOD1_STOREY_M[1] * nf_ + 1.5):
+                    got = None
+                if got is not None:
+                    at = dict(at, height=got[0], height_eave=True)
+                    if got[1] == LOD1_FLAT_ROOF and not at.get("roof_shape"):
+                        at["roof_shape"] = "flat"
             bparts = parts_of.get(str(key)) if key is not None else None
             ship_parts = None
             if bparts and "src_dataset" in a and str(a["src_dataset"][i]) == "OpenStreetMap":
@@ -4176,6 +4267,7 @@ def road_tile_items(
         skip=skip,
         house_land_layers=[c.layers.get("land_use") for c in cds],
         lod2_models=lod2_models(frame, x0, y0, x1, y1, md),
+        lod1=lod1_heights(frame, x0, y0, x1, y1, md),
     )
     custom = []
     if cache_dir is not None:
@@ -4484,7 +4576,8 @@ def far_items(frame, tile, ty, md, ground, lamp_region=None):
                            bridges_xy=bridge_lines(frame, [c.layers.get("roads") for c in cds], x0, y0),
                            water_xy=water_rings(frame, [c.layers.get("water") for c in cds], x0, y0),
                            ml_roads_xy=road_lines(frame, [c.layers.get("roads") for c in cds], x0, y0),
-                           ways_xy=way_lines(frame, [c.layers.get("roads") for c in cds], x0, y0, size=x1 - x0))
+                           ways_xy=way_lines(frame, [c.layers.get("roads") for c in cds], x0, y0, size=x1 - x0),
+                           lod1=lod1_heights(frame, x0, y0, x1, y1, md))
     size = max(x1 - x0, y1 - y0)
     lamps = far_lamps(frame, [c.layers.get("roads") for c in cds], x0, y0, size,
                       built_squares(items, 0.0, 0.0, size), ground, lamp_region, own=own)
@@ -4723,7 +4816,8 @@ def sky_items(frame, box, keys, md, ground, lamp_region=None, own=None):
         return None
     cds = [md.cell(k, layers=("buildings", "roads"), kind="background") for k in keys]
     layers = [c.layers.get("buildings") for c in cds]
-    items = tile_buildings(frame, x0, y0, x1, y1, layers, ground, min_size=(1e9, SKY_MIN_AREA_M2), own=own)
+    items = tile_buildings(frame, x0, y0, x1, y1, layers, ground, min_size=(1e9, SKY_MIN_AREA_M2), own=own,
+                           lod1=lod1_heights(frame, x0, y0, x1, y1, md, kind="background"))
     size = max(x1 - x0, y1 - y0)
     lamps = far_lamps(frame, [c.layers.get("roads") for c in cds], x0, y0, size,
                       built_squares(items, 0.0, 0.0, size), ground, lamp_region, own=own)

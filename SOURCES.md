@@ -35,7 +35,7 @@ For the OpenStreetMap keys read by the server and weekly data builders, see the
 | Overture Maps (map data releases) | `overturemaps-us-west-2.s3.us-west-2.amazonaws.com` | Every road and railway line, every building (footprint, height, roof shape where mapped), water areas, rivers, land use (parks, farmland, industrial areas), bridges and tunnels as mapped, gas stations, airports' surroundings, and the town, state and country names in the status bar. Read in small ranges of large files: only the part around you. | Places you have not visited before come without roads, buildings or water (and the status bar without the town name) until it answers. Places you have visited load from disk. | named |
 | Overture Maps (second copy, on Azure) | `overturemapswestus2.blob.core.windows.net` | The same data, used when the first copy does not answer. | Only matters while the first copy is down too. | named |
 | Overture Maps file index | `stac.overturemaps.org` | The list of which file holds which part of the world. | The app carries its own copy of the list, which is used instead. | named |
-| Poland's 3D building models (GUGiK, CityGML LoD2) | `opendata.geoportal.gov.pl` | Only with `BNE_PL_LOD2=on` (off by default): the real shape, height and roof of buildings in the parts of Poland that have the models (Warsaw, Kraków, Katowice, Lublin, Białystok, Rzeszów, Olsztyn, Bydgoszcz, Toruń and the voivodeships round them), in place of the map's footprints. One map sheet (about 2 x 2 km) at a time, read as one small range of the county's file, kept on disk. | The buildings there are the map's footprints until it answers. | optional |
+| Poland's 3D building models (GUGiK, CityGML LoD2) | `opendata.geoportal.gov.pl` | Only with `BNE_PL_LOD2=on` (off by default): the real shape, height and roof of buildings in the parts of Poland that have the models (Warsaw, Kraków, Katowice, Lublin, Białystok, Rzeszów, Olsztyn, Bydgoszcz, Toruń and the voivodeships round them), in place of the map's footprints. Also, everywhere in Poland, the measured heights (2023) of buildings near and far whose height the map does not give. One map sheet (about 2 x 2 km) at a time, read as one small range of the county's file, kept on disk. | The buildings there are the map's footprints until it answers. | optional |
 | OpenStreetMap road details (OSM US Layercake) | `data.openstreetmap.us` | OpenStreetMap's own road tags matched to the roads: lanes, widths, sidewalks, surfaces, speed limits, roads under construction. | Roads keep their width, lane and sidewalk estimates from their class and the land around them. | optional |
 
 ## Terrain heights (elevation)
@@ -128,7 +128,7 @@ Baden-Wurttemberg (`owsproxy.lgl-bw.de`), Lower Saxony (`opendata.lgln.niedersac
 - **Bridge types** (the US National Bridge Inventory and Wikidata): trusses, arches, suspension and cable-stayed
   bridges, and their real spans and heights.
 - **The Overture Maps file index**: a copy for when its server does not answer.
-- **Where Poland's 3D building models are** (`server/data/pl_lod2_sheets.json.gz`, from GUGiK's file listings,
+- **Where Poland's 3D building models are** (`server/data/pl_lod2_sheets.json.gz` and `pl_lod1_sheets.json.gz`, from GUGiK's file listings,
   `tools/build_pl_lod2_index.py`): which map sheets have models and where each lies in its county's file.
 - **Interstate mile references** (`server/mile_markers_us.json`): the restored Michigan DOT and Kentucky
   Transportation Cabinet inventory from the 1.7.0 custom build, dated 2026-10-23. Source URLs and calibration

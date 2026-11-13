@@ -2,7 +2,10 @@
 
 BNE_PL_LOD2=on (off by default). Where the bundled index (data/pl_lod2_sheets.json.gz, tools/build_pl_lod2_index.py)
 has a model sheet for the place, a road tile's buildings are GUGiK's: their real footprints, heights and roof shapes
-(2015-2018, from 2012 airborne laser scanning; 219 of Poland's 380 powiats: ten whole voivodeships, Warsaw among them).
+(2015-2018, from 2012 airborne laser scanning; 236 of Poland's 380 powiats: ten whole voivodeships and Silesia's
+cities, Warsaw among them). Everywhere in Poland, the map's footprints without a height take LoD1 2024's (heights()):
+GUGiK's blocks of one measured height from the 2023 scan (data/pl_lod1_sheets.json.gz; the near, far and skyline
+buildings: buildings._Lod1).
 
   * Data: one zip per powiat, https://opendata.geoportal.gov.pl/InneDane/Budynki3D/LOD2/<TERYT>_gml.zip, one CityGML
     file per 1:5,000 map sheet (~2.1 x 2.3 km, 1-80 MB of XML). The index says where each sheet's entry starts in its
@@ -39,7 +42,11 @@ log = logging.getLogger("earthd.pl_lod2")
 
 ON = os.environ.get("BNE_PL_LOD2", "off").lower() in ("on", "1", "true", "yes")
 FORMAT = 1                  # the parsed sheets' layout (bump on a change: the cache's subdirectory)
-INDEX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "pl_lod2_sheets.json.gz")
+LOD2, LOD1 = "lod2", "lod1"
+INDEXES = {d: os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", f"pl_{d}_sheets.json.gz")
+           for d in (LOD2, LOD1)}
+INDEX = INDEXES[LOD2]
+FORMATS = {LOD2: FORMAT, LOD1: 1}       # (each dataset's parsed layout: its cache's subdirectory)
 HOST = "opendata.geoportal.gov.pl"
 MAX_TRIS = 4000             # a model with more triangles (a stadium's roof, a refinery) is left out: its footprint stays
 MEM_SHEETS = 6              # parsed sheets kept in memory per process
@@ -142,27 +149,39 @@ def sheets_in(south, west, north, east):
 
 # ------------------------------------------------------------------------------------------------ the index
 
-@lru_cache(maxsize=1)
-def index():
-    """The bundled index: {"base", "zips": {teryt: {...}}, "sheets": {name: [[teryt, offset, compressed, size, crc32,
-    method], ...]}}; an empty one when it is missing."""
+@lru_cache(maxsize=2)
+def index(dataset=LOD2):
+    """A bundled index (LOD2: data/pl_lod2_sheets.json.gz; LOD1: data/pl_lod1_sheets.json.gz): {"base" or "url" (a
+    powiat's zip: base + <TERYT>_gml.zip, or the template with {teryt} and {woj}), "zips": {teryt: {...}}, "sheets":
+    {name: [[teryt, offset, compressed, size, crc32, method], ...]}}; an empty one when it is missing."""
+    path = INDEXES[dataset]
     try:
-        with gzip.open(INDEX, "rt", encoding="utf-8") as f:
+        with gzip.open(path, "rt", encoding="utf-8") as f:
             return json.load(f)
     except (OSError, ValueError):
-        log.warning("LoD2 index %s missing or unreadable: no Polish 3D buildings", INDEX)
+        log.warning("index %s missing or unreadable: no Polish 3D buildings from it", path)
         return {"base": "", "zips": {}, "sheets": {}}
 
 
-def has_sheet(name):
-    return name in index()["sheets"]
+def zip_url(idx_or_base, teryt):
+    """The URL of a powiat's zip: an index's "url" template ({teryt}, {woj}), else its base + <TERYT>_gml.zip (a base
+    string alone: the same)."""
+    if isinstance(idx_or_base, dict):
+        idx_or_base = idx_or_base.get("url") or idx_or_base.get("base", "")
+    if "{teryt}" in idx_or_base:
+        return idx_or_base.format(teryt=teryt, woj=teryt[:2])
+    return f"{idx_or_base}{teryt}_gml.zip"
 
 
-def covered(south, west, north, east):
+def has_sheet(name, dataset=LOD2):
+    return name in index(dataset)["sheets"]
+
+
+def covered(south, west, north, east, dataset=LOD2):
     """Whether any model sheet touches the box (degrees). Cheap: a box outside Poland is answered without the index."""
     if north < 49.0 or south > 54.9 or east < 14.1 or west > 24.2:
         return False
-    return any(has_sheet(s) for s in sheets_in(south, west, north, east))
+    return any(has_sheet(s, dataset) for s in sheets_in(south, west, north, east))
 
 
 # ------------------------------------------------------------------------------------------------ CityGML
@@ -305,6 +324,85 @@ def pack(blds):
             "verts": np.concatenate(verts).astype(np.float32), "ntri": np.array(ntri, np.int32)}
 
 
+def _block1(el):
+    """One LoD1 bldg:Building: (id, roof type, measured height, footprint (k, 2)) or None. The footprint: the solid's
+    face whose points are all at its lowest height (the bottom)."""
+    bid, roof_type, h = el.get("{http://www.opengis.net/gml}id"), -1, None
+    faces = []
+    for sub in el.iter():
+        t = _local(sub.tag)
+        if t == "roofType" and sub.text:
+            try:
+                roof_type = int(sub.text.strip())
+            except ValueError:
+                pass
+        elif t == "measuredHeight" and sub.text:
+            try:
+                h = float(sub.text.strip())
+            except ValueError:
+                pass
+        elif t == "stringAttribute" and sub.get("name") == "buildingId":
+            v = next((c.text for c in sub if _local(c.tag) == "value"), None)
+            if v:
+                bid = v.strip()
+        elif t == "Polygon":
+            ext = next((c for c in sub if _local(c.tag) == "exterior"), None)
+            r = _coords(ext) if ext is not None else None
+            if r is not None:
+                faces.append(r)
+    if h is None or not faces:
+        return None
+    z0 = min(float(r[:, 2].min()) for r in faces)
+    bottom = [r for r in faces if float(r[:, 2].max()) - z0 < 0.01]
+    if not bottom:
+        return None
+    fp = max(bottom, key=lambda r: abs(_area_xy(r)))
+    return bid, roof_type, h, fp[:, :2]
+
+
+def parse1(chunks):
+    """The buildings of a LoD1 CityGML file (streamed): a list of _block1 tuples."""
+    parser = ET.XMLPullParser(events=("end",))
+    out = []
+
+    def drain():
+        for _ev, el in parser.read_events():
+            if _local(el.tag) == "Building":
+                b = _block1(el)
+                if b is not None:
+                    out.append(b)
+                el.clear()
+    for chunk in chunks:
+        parser.feed(chunk)
+        drain()
+    parser.close()
+    drain()
+    return out
+
+
+def pack1(blds):
+    """The npz arrays of parsed LoD1 buildings (a building in two powiats' files once)."""
+    seen, keep = set(), []
+    for b in blds:
+        if b[0] not in seen:
+            seen.add(b[0])
+            keep.append(b)
+    if not keep:
+        return {"origin": np.zeros(2), "ids": np.array([], "U1"), "roof": np.zeros(0, np.int16),
+                "height": np.zeros(0, np.float32), "bbox": np.zeros((0, 4), np.float32),
+                "fp_off": np.zeros(1, np.int32), "fp": np.zeros((0, 2), np.float32)}
+    origin = np.floor(np.min([b[3].min(0) for b in keep], 0))
+    fps = [b[3] - origin for b in keep]
+    return {"origin": origin, "ids": np.array([b[0] for b in keep]), "roof": np.array([b[1] for b in keep], np.int16),
+            "height": np.array([b[2] for b in keep], np.float32),
+            "bbox": np.array([(*f.min(0), *f.max(0)) for f in fps], np.float32),
+            "fp_off": np.r_[0, np.cumsum([len(f) for f in fps])].astype(np.int32),
+            "fp": np.concatenate(fps).astype(np.float32)}
+
+
+PARSERS = {LOD2: (lambda ch: parse(ch), lambda b: pack(b)), LOD1: (lambda ch: parse1(ch), lambda b: pack1(b))}
+
+
 # ------------------------------------------------------------------------------------------------ fetching
 
 class Unavailable(IOError):
@@ -343,11 +441,12 @@ LOCAL_HEADER = struct.Struct("<IHHHHHIIIHH")     # (signature 0x04034b50, ..., n
 HEADER_SLACK = 512                                # bytes read past the fixed header for the name and extra field
 
 
-def fetch_entry(fetcher, base, entry, sheet, kind="demand"):
-    """The parsed buildings of one powiat's file of a sheet (entry: the index's row), fetched in one Range request."""
+def fetch_entry(fetcher, base, entry, sheet, kind="demand", dataset=LOD2):
+    """The parsed buildings of one powiat's file of a sheet (entry: the index's row; base: the index, or its base URL
+    or template, zip_url), fetched in one Range request."""
     import netfetch
     teryt, offset, csize, size, crc, method = entry[:6]
-    url = f"{base}{teryt}_gml.zip"
+    url = zip_url(base, teryt)
     end = offset + LOCAL_HEADER.size + HEADER_SLACK + csize - 1
     try:
         r = fetcher.get(url, kind=kind, headers={"Range": f"bytes={offset}-{end}"})
@@ -360,7 +459,7 @@ def fetch_entry(fetcher, base, entry, sheet, kind="demand"):
         raise Unavailable(f"{url}: {len(body)} bytes at {offset}")
     sig, *_rest, nlen, xlen = LOCAL_HEADER.unpack_from(body)
     name = body[LOCAL_HEADER.size:LOCAL_HEADER.size + nlen].decode("utf-8", "replace")
-    if sig != 0x04034B50 or not name.endswith(f"{teryt}_{sheet}.gml"):
+    if sig != 0x04034B50 or not name.lower().endswith(f"{teryt}_{sheet}.gml".lower()):
         raise Unavailable(f"{url}: no entry {teryt}_{sheet}.gml at {offset} (the zip changed?)")
     start = LOCAL_HEADER.size + nlen + xlen
     data = body[start:start + csize]
@@ -371,7 +470,7 @@ def fetch_entry(fetcher, base, entry, sheet, kind="demand"):
         if len(data) != csize:
             raise Unavailable(f"{url}: {len(data)} of {csize} bytes")
     try:
-        return parse(_checked(_inflate(data, method), size, crc))
+        return PARSERS[dataset][0](_checked(_inflate(data, method), size, crc))
     except (ET.ParseError, zlib.error) as e:
         raise Unavailable(f"{url} {teryt}_{sheet}.gml: {e}") from e
 
@@ -394,8 +493,9 @@ class Sheet:
 class Source:
     """Sheets from the disk cache, else the host (one per process: source())."""
 
-    def __init__(self, cache_dir, fetcher):
-        self.dir = os.path.join(cache_dir, "pl_lod2", f"v{FORMAT}")
+    def __init__(self, cache_dir, fetcher, dataset=LOD2):
+        self.dataset = dataset
+        self.dir = os.path.join(cache_dir, f"pl_{dataset}", f"v{FORMATS[dataset]}")
         self.fetcher = fetcher
         self._mem = OrderedDict()
         self._lock = threading.Lock()
@@ -407,7 +507,7 @@ class Source:
 
     def sheet(self, name, kind="demand"):
         """The Sheet, or None where there are no models; raises Unavailable when it could not be had now."""
-        idx = index()
+        idx = index(self.dataset)
         entries = idx["sheets"].get(name)
         if not entries:
             return None
@@ -421,7 +521,7 @@ class Source:
             with self._lock:
                 s = self._mem.get(name)
             if s is None:
-                s = self._load(name, entries, idx["base"], kind)
+                s = self._load(name, entries, idx, kind)
                 with self._lock:
                     self._mem[name] = s
                     while len(self._mem) > MEM_SHEETS:
@@ -443,16 +543,16 @@ class Source:
         try:
             blds = []
             for e in entries:
-                blds.extend(fetch_entry(self.fetcher, base, e, name, kind))
+                blds.extend(fetch_entry(self.fetcher, base, e, name, kind, self.dataset))
         except Unavailable:
             self._missed[name] = time.monotonic()
             raise
-        arrays = pack(blds)
+        arrays = PARSERS[self.dataset][1](blds)
         os.makedirs(self.dir, exist_ok=True)
         tmp = f"{p}.{os.getpid()}.{threading.get_ident()}.tmp.npz"
         np.savez_compressed(tmp, **arrays)
         os.replace(tmp, p)
-        log.info("LoD2 sheet %s: %d buildings from %d file(s) in %.1f s", name, len(arrays["ids"]), len(entries),
+        log.info(f"{self.dataset} sheet %s: %d buildings from %d file(s) in %.1f s", name, len(arrays["ids"]), len(entries),
                  time.perf_counter() - t0)
         return Sheet(name, arrays)
 
@@ -461,12 +561,12 @@ _sources = {}
 _sources_lock = threading.Lock()
 
 
-def source(cache_dir, fetcher):
-    """This process's Source for a cache directory."""
+def source(cache_dir, fetcher, dataset=LOD2):
+    """This process's Source of a dataset for a cache directory."""
     with _sources_lock:
-        s = _sources.get(cache_dir)
+        s = _sources.get((cache_dir, dataset))
         if s is None:
-            s = _sources[cache_dir] = Source(cache_dir, fetcher)
+            s = _sources[(cache_dir, dataset)] = Source(cache_dir, fetcher, dataset)
         return s
 
 
@@ -598,4 +698,43 @@ def models(frame, x0, y0, x1, y1, cache_dir, fetcher, kind="demand", margin=0.0)
         rows = s.select(E.min(), N.min(), E.max(), N.max())
         rows = [i for i in rows if s.a["ntri"][i] <= MAX_TRIS]
         out.extend(_models(s, rows, frame))
+    return out
+
+
+# ------------------------------------------------------------------------------------------------ a tile's heights
+
+def heights(frame, x0, y0, x1, y1, cache_dir, fetcher, kind="demand", margin=0.0):
+    """LoD1 2024's buildings (every powiat: footprints and measured heights, from the 2023 scan) whose box meets the box
+    [x0, x1] x [y0, y1] of the anchor's frame grown by margin: [(ring (k, 2) in the anchor's frame, height m, roof
+    type)]. Raises Unavailable when a sheet there could not be had now."""
+    xs = np.array([x0 - margin, x1 + margin, x1 + margin, x0 - margin])
+    ys = np.array([y0 - margin, y0 - margin, y1 + margin, y1 + margin])
+    la, lo, _ = frame.enu_to_geodetic(xs, ys, np.zeros(4))
+    la, lo = np.asarray(la, np.float64), np.asarray(lo, np.float64)
+    if not covered(la.min(), lo.min(), la.max(), lo.max(), LOD1):
+        return []
+    E, N = to_puwg92(la, lo)
+    src = source(cache_dir, fetcher, LOD1)
+    out = []
+    for name in sheets_in(la.min(), lo.min(), la.max(), lo.max()):
+        s = src.sheet(name, kind)
+        if s is None or not s.n:
+            continue
+        rows = s.select(E.min(), N.min(), E.max(), N.max())
+        if not len(rows):
+            continue
+        a = s.a
+        off = a["fp_off"]
+        rings = [a["fp"][off[i]:off[i + 1]].astype(np.float64) for i in rows]
+        pts = np.concatenate(rings) + s.origin
+        plat, plon = from_puwg92(pts[:, 0], pts[:, 1])
+        x, y, _ = frame.geodetic_to_enu(plat, plon, np.zeros(len(plat)))
+        xy = np.c_[np.asarray(x, np.float64), np.asarray(y, np.float64)]
+        k = 0
+        for i, r in zip(rows, rings):
+            ring = xy[k:k + len(r)]
+            k += len(r)
+            if _area_xy(ring) < 0:
+                ring = ring[::-1]
+            out.append((ring, float(a["height"][i]), int(a["roof"][i])))
     return out
