@@ -9192,6 +9192,10 @@ def build_tile(frame, tx, ty, cells, elev, urban_fn=None, walks=None, bridges=No
         for f in isl:
             if f["ring"] is None:
                 continue
+            # (Sweden, Poland: no island's curb across a tram track. The box two dual carriageways make where they
+            # cross is such a loop, and the tram of one runs through it: Warsaw, Krucza at Aleje Jerozolimskie)
+            if trams and any(railways.crosses(np.vstack([f["ring"], f["ring"][:1]]), t[0], 0.0) for t in trams):
+                continue
             # (from its south-west-most point: each tile finds the loop from its own roads, starting anywhere)
             ring = np.roll(f["ring"], -int(np.lexsort((f["ring"][:, 1], f["ring"][:, 0]))[0]), axis=0)
             # (closed: offset with a vertex either side of its start, so its ends meet mitred, not 5 cm apart)
@@ -9212,6 +9216,8 @@ def build_tile(frame, tx, ty, cells, elev, urban_fn=None, walks=None, bridges=No
                 for f2, s2, p2, _ in roads:
                     if f2 != fid and np.hypot(*(p2[:, :2] - X).T).min() < 1.0:
                         cornered.add((fid, f2))
+        tram_rails = [(ln, rails.STREET_TRACK["w"] / 2) for ln, _hw in trams]    # (the track itself, not its paving)
+        tram_boxes = {}                         # (_within_any's boxes of them)
         for c in corners:                       # each corner / crosswalk made by the tile it is in
             p = c["arc"][len(c["arc"]) // 2]
             if isl and islands.in_island(isl, p[:2]):
@@ -9222,6 +9228,9 @@ def build_tile(frame, tx, ty, cells, elev, urban_fn=None, walks=None, bridges=No
                    < float(np.max(np.hypot(*(f["poly"] - f["poly"].mean(0)).T))) + islands.ENTRY_CLEAR_M
                    for f in isl if f.get("round")):
                 continue
+            if tram_rails and any(_within_any(q[:2], tram_rails, tram_boxes) for q in np.asarray(c["arc"])):
+                continue                        # (Sweden, Poland) a curb return over a tram track: two medians' ends
+                                                # either side of the track met across it
             if skin_own(p[0], p[1]):
                 walks.append({"corner": c})
                 fill_look = _corner_look(p, roads)
