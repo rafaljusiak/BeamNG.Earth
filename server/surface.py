@@ -270,10 +270,24 @@ def paint_roads(idx, lat, lon, feats_list, square, urban_fn=None, widths=None, e
         if aisle:
             width += 2 * AISLE_STALLS_M         # the stalls either side (parking.aisle_spots): no grass under cars
         walks = roadsmod.has_sidewalks(spec)
-        if walks:
+        strips = []
+        if walks and getattr(spec, "sep", None) and len(x) >= 2:
+            # sidewalks mapped beside the road (roads.walk_at): each side's strip where it is drawn, the verge between
+            # it and the carriageway left as the ground's (painted to their outer edge, the verge was asphalt)
+            sc = np.array([111320.0 * math.cos(math.radians(float(y[0]))), 110540.0])
+            xy = np.c_[(np.asarray(x, np.float64) - x[0]) * sc[0], (np.asarray(y, np.float64) - y[0]) * sc[1],
+                       np.zeros(len(x))]
+            for side in roadsmod.walk_sides(spec):
+                gap, ww = roadsmod.walk_at(spec, side)
+                off = roadsmod.offset_polyline(xy, side * (spec.width / 2 + gap + (ww + square) / 2))[:, :2] / sc
+                strips.append((off[:, 0] + x[0], off[:, 1] + y[0], (ww + square) / 2))
+        elif walks:
             width += 2 * (spec.walk + square)   # the sidewalks (+ a sample: tufts at the outer edge): grass grew up
                                                 # through them (ground cover is the terrain's: Lauterbrunnen, Baltimore
                                                 # 2026-10-15)
+        for sx, sy, half in strips:
+            sc_, sr_ = to_px(sx, sy)
+            add(segs[kind], np.asarray(sc_, np.float64), np.asarray(sr_, np.float64), half)
         c, r = to_px(x, y)
         c, r = np.asarray(c, np.float64), np.asarray(r, np.float64)
         reach = (float(np.max(width)) / 2 + ROAD_EDGE_M + (0 if walks else VERGE_M)) / square + 2
@@ -301,7 +315,7 @@ def paint_roads(idx, lat, lon, feats_list, square, urban_fn=None, widths=None, e
                 continue
             seen.add(fid)
             # (all of it off the grid, with room for everything drawn beside it: no sample of it is painted)
-            m = (specs[i].width + 2 * AISLE_STALLS_M + 2 * (specs[i].walk + square) + 2 * VERGE_M
+            m = (specs[i].width + 2 * AISLE_STALLS_M + 2 * (roadsmod.walk_reach(specs[i]) + square) + 2 * VERGE_M
                  + 3 * roadsmod.median_width(specs[i])) / square + 4
             if not (c_hi[i] >= -m and c_lo[i] <= w + m and r_hi[i] >= -m and r_lo[i] <= h + m):
                 continue

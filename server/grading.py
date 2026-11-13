@@ -1810,7 +1810,8 @@ def shoulder(spec):
         return MOUNTAIN_SHOULDER_M
     if spec.cls in roadsmod.SIDEWALK_CLASSES or (spec.cls == "trunk" and (not spec.oneway
                                                                           or roadsmod._arterial(spec))):
-        return spec.walk + SIDEWALK_MARGIN_M
+        # (a sidewalk mapped beside the road: the verge and the sidewalk beyond it on the road's flat ground)
+        return roadsmod.walk_reach(spec) + SIDEWALK_MARGIN_M
     return SHOULDER_M
 
 

@@ -63,6 +63,14 @@ def pave_radius(spi, spj, radius):
     return max(radius, PAVE_RADIUS_MAJOR if (spi.cls in PAVE_MAJOR or spj.cls in PAVE_MAJOR) else PAVE_RADIUS)
 
 
+def _walk_reach(spec, side):
+    """m from a road's carriageway edge to the outer edge of its sidewalk on side (roads.walk_reach)."""
+    if not getattr(spec, "sep", None):
+        return spec.walk
+    from roads import walk_reach
+    return walk_reach(spec, side)
+
+
 def _unit(v):
     n = math.hypot(v[0], v[1])
     return v / n if n > 1e-9 else v
@@ -206,8 +214,8 @@ def _across(roads, bi, bj, cr, X, walk_w, debug=None):
     """The corner from branch bi (its left side) to branch bj (its right side), whose nodes the road cr joins:
     (corner dict as find's, cut on bi, cut on bj) or None (the pieces do not fit, or the corner would lie on a
     carriageway). No curb extensions here: the curb at the full width."""
-    _, ri, vi, si, ui, _, Pi = bi
-    _, rj, vj, sj, uj, _, Pj = bj
+    _, ri, vi, si, ui, li, Pi = bi
+    _, rj, vj, sj, uj, lj, Pj = bj
     spi, spj, spc = roads[ri][1], roads[rj][1], roads[cr][1]
     d = Pj - Pi
     Lc = math.hypot(*d)
@@ -248,8 +256,8 @@ def _across(roads, bi, bj, cr, X, walk_w, debug=None):
     nrm /= np.maximum(np.hypot(*nrm.T), 1e-9)[:, None]
     flip = ((curb2 - X) * nrm).sum(1) < 0           # toward the sidewalk: away from the junction
     nrm[flip] = -nrm[flip]
-    wki = spi.walk if walk_w is None else walk_w
-    wkj = spj.walk if walk_w is None else walk_w
+    wki = _walk_reach(spi, li) if walk_w is None else walk_w
+    wkj = _walk_reach(spj, -lj) if walk_w is None else walk_w
     wkc = max(wki, wkj)
     ni, nj, nc = _left(ui), _left(uj), _left(uc)
     Oi = _line_x(Pi + ni * (wi + wki), ui, Pi - nc * (wc + wkc), uc)
@@ -491,8 +499,10 @@ def find(roads, has_walk, walk_w, parking_m=0.0, has_parking=lambda spec: False,
                     if debug is not None:
                         debug.append(('short branch', round(_branch_len(roads[ri][2], vi, si), 1), round(ci, 1), round(_branch_len(roads[rj][2], vj, sj), 1), round(cj, 1), X.round(1).tolist()))
                     continue
-                wki = spi.walk if walk_w is None else walk_w
-                wkj = spj.walk if walk_w is None else walk_w
+                # (to the outer edge of each street's sidewalk: one mapped beside its road, roads.walk_at, is a
+                # verge's width further out, and the corner's slab is paved from the curb to it, as corners are)
+                wki = _walk_reach(spi, li) if walk_w is None else walk_w
+                wkj = _walk_reach(spj, -lj) if walk_w is None else walk_w
                 O = _line_x(Pi + ni * (wi + wki), ui, Pj - nj * (wj + wkj), uj)
                 if O is None:
                     continue

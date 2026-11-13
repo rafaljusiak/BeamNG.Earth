@@ -122,7 +122,7 @@ class PlanCache:
     def load(self, key):
         """(plans, keeps, covers, opens) of cell key from the cache, or None."""
         from grading import Plan, set_widen
-        from roads import Spec
+        import roads
         try:
             src = self._path(key)
             if not os.path.exists(src):
@@ -149,7 +149,7 @@ class PlanCache:
             plans.append((m["fid"], pl))
         keeps = list(zip(lists["k"], meta["keeps"]))
         covers = list(zip(lists["v"], meta["covers"]))
-        opens = [(xy, Spec(**{**sp, "sides": tuple(sp["sides"]) if sp.get("sides") is not None else None}))
+        opens = [(xy, roads.spec_from(sp))
                  for xy, sp in zip(lists["o"], meta["opens"])]   # (JSON gave sides back as a list)
         with self._lock:
             self.stats["read"] += 1
@@ -225,8 +225,7 @@ class PlanCache:
                            "widen": getattr(p, "widen", None) is not None}
                           for fid, p in plans],
                 "keeps": [float(hw) for _xy, hw in keeps], "covers": [float(w) for _xy, w in covers],
-                "opens": [{k: (v.item() if hasattr(v, "item") else v) for k, v in sp._asdict().items()}
-                          for _xy, sp in opens]}
+                "opens": [roads._spec_json(sp) for _xy, sp in opens]}
         arrays = {"meta": np.frombuffer(json.dumps(meta).encode("utf-8"), np.uint8)}
         try:
             _pack(arrays, "p", [p.xy for _f, p in plans])

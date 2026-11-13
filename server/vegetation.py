@@ -961,7 +961,8 @@ def _mask_roads(f, mask, chm, push=None, clear=ROAD_CLEAR_M, specs=None, walks=F
     def drawn(s):       # the drawn half width, its sidewalks too (walks: the canopy's trees and the bushes keep off
         if s is None:   # them; the street trees, pushed to the curb, stand in pits at its edge: GitHub #424 / #425)
             return 0.0
-        return s.width / 2 + (s.walk if walks and getattr(s, "walk", 0) and roadsmod.has_sidewalks(s) else 0.0)
+        return s.width / 2 + (roadsmod.walk_reach(s) if walks and getattr(s, "walk", 0) and roadsmod.has_sidewalks(s)
+                              else 0.0)
     hw_m = np.array([max(ROAD_HALF_WIDTH_M.get(str(cls[i]), ROAD_HALF_DEFAULT_M), drawn(sp[i])) + clear
                      for i in sel], np.float64)
     # every ring's segments on the CHM grid, its half width in grid pixels (a 3857 metre is 1 / cos(lat) of a ground

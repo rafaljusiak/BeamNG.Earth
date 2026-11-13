@@ -989,7 +989,7 @@ def place(roads, walks, box, curb_h=0.15, wires=None, town=False, left_hand=Fals
             if development is None:             # (no context given: the old rule, town streets only)
                 return bool(spec.urban)
             # Runs follow the sidewalk's middle; frontage offsets are measured from the road centreline.
-            centre = p[:2] - out * (spec.width / 2 + w / 2)
+            centre = p[:2] - out * (spec.width / 2 + wk.get("gap", 0.0) + w / 2)
             context = development.sample(centre, out, spec.width / 2)
             if context is None:                 # (no map data for the context: the old rule)
                 return bool(spec.urban)

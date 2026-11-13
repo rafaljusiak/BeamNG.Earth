@@ -67,7 +67,8 @@ def curb_spots(roads, walks, box, left_hand=False, directions=None):
         w = wk.get("w", 2.5)
         phase = furniture._h01(fid, side, "parkph") * SPOT_LEN_M
         for p, away in furniture._stations(run, line, SPOT_LEN_M, phase, CORNER_CLEAR_M, side):
-            q = p[:2] - away * (w / 2 + CURB_OFF_M)          # from the sidewalk's middle past the curb
+            # from the sidewalk's middle past the curb (and the verge of one mapped beside its road: walk "gap")
+            q = p[:2] - away * (w / 2 + wk.get("gap", 0.0) + CURB_OFF_M)
             if not (_owns(box, q[0], q[1])):
                 continue
             # the car's right side to the curb: heading h with right(h) = (h_y, -h_x) = away

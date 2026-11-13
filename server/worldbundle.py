@@ -313,7 +313,7 @@ def validate_artifact(data, artifact=None):
             raise BundleError("Invalid width")
     opens = []
     for xy, spec in zip(groups["o"], meta["opens"]):
-        if not isinstance(spec, dict) or set(spec) != set(Spec._fields):
+        if not isinstance(spec, dict) or set(spec) | {"sep"} != set(Spec._fields):   # (sep: absent before facts 8)
             raise BundleError("Invalid road specification")
         for name, value in spec.items():
             if name in ("kind", "cls"):
@@ -324,13 +324,17 @@ def validate_artifact(data, artifact=None):
                 valid = type(value) is bool
             elif name == "sides":
                 valid = value is None or isinstance(value, list) and len(value) <= 2 and all(type(v) is int and v in (-1, 1) for v in value)
+            elif name == "sep":
+                valid = value is None or isinstance(value, list) and len(value) <= 2 and all(
+                    isinstance(v, list) and len(v) == 3 and type(v[0]) is int and v[0] in (-1, 1)
+                    and _number(v[1], 0, 100) and _number(v[2], 0, 100) for v in value)
             elif name == "dir":
                 valid = type(value) is int and value in (-1, 0, 1)
             else:
                 valid = value is None and name in ("kmh", "gap", "median", "lanes") or _number(value, 0, 10000)
             if not valid:
                 raise BundleError("Invalid road specification field")
-        opens.append((xy, Spec(**{**spec, "sides": tuple(spec["sides"]) if spec["sides"] is not None else None})))
+        opens.append((xy, roads.spec_from(spec)))
     return plans, list(zip(groups["k"], meta["keeps"])), list(zip(groups["v"], meta["covers"])), opens
 
 

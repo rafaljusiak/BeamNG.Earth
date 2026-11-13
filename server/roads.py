@@ -160,11 +160,13 @@ def look_of(spec, fid=None):
         n = 0 if fid is None else int.from_bytes(hashlib.blake2s(str(fid).encode(), digest_size=2).digest(), "little")
         look = {**look, "m": vary[n % len(vary)]}
     return {**look, "tl": round(float(look["aspect"]) * float(spec.width), 2)}
-Spec = namedtuple("Spec", "width kind urban cls oneway walk dir kmh gap median lanes surf link sides parking mountain france state",
-                  defaults=(False, 2.5, 0, None, None, None, None, None, False, None, True, False, False, None))   # median: m to the other carriageway's centre line
+Spec = namedtuple("Spec", "width kind urban cls oneway walk dir kmh gap median lanes surf link sides parking mountain france state sep",
+                  defaults=(False, 2.5, 0, None, None, None, None, None, False, None, True, False, False, None, None))   # median: m to the other carriageway's centre line
 # (state: the US state / region whose marking profile the road takes, roadmarkings.profile; PR #843)
 # (parking: whether a town street's carriageway holds parking lanes: _swedish_specs; mountain: a mountain pass road,
 # _mountain_roads; france: PR #505's French road scenery, BNE_FR_ROADS)
+# (sep: the sidewalks mapped as ways of their own beside the road, ((side, m from the road's centre line to the
+# footway's line, its width m), ...), None where none: _osm_sidewalks, walk_at)
 # (sides: the sidewalk sides OpenStreetMap's sidewalk tag gives (_osm_sidewalks; walk_sides' +1 left / -1 right of the
 # geometry, () none), None where it has none: the class and land-cover rule, has_sidewalks; from mpsteppe's PR #292)
 # (lanes: resolved count, both directions on a two-way road, including highway/ramp defaults; None unknown elsewhere.
@@ -472,7 +474,7 @@ def _facts_load(feats, kind, extra):
 # (bakepack.py), in place of the code hash; the plans' key holds it too (plancache.plans_format). Bump it whenever a
 # change makes other facts (level ranges, specs, lane flow, grade separations or their inputs' rules), or players keep
 # the old ones; tests/test_bake_formats.py fails until it is bumped.
-FACTS_FORMAT = 7      # 7: PR #843 (restored highway shoulders, regional merge marking profiles: Spec.state); 6: busways (PR #836) and walkway spans (PR #842) in the cells; 5: PR #505's Spec.france (French road scenery flag); 4: pass roads with a mapped or default two-lane count stay mountain roads (the Stelvio); 3: PR #471 lane counts (validated highway counts, two-lane highway default) and #686 (Swedish dual carriageways, 2.75 m lanes); 2: OSM's own surface first, "unpaved" on car roads gravel, regional gravel for untagged minor roads
+FACTS_FORMAT = 8      # 8: sidewalks mapped beside their road (Spec.sep, sidewalk=separate: _osm_sidewalks); 7: PR #843 (restored highway shoulders, regional merge marking profiles: Spec.state); 6: busways (PR #836) and walkway spans (PR #842) in the cells; 5: PR #505's Spec.france (French road scenery flag); 4: pass roads with a mapped or default two-lane count stay mountain roads (the Stelvio); 3: PR #471 lane counts (validated highway counts, two-lane highway default) and #686 (Swedish dual carriageways, 2.75 m lanes); 2: OSM's own surface first, "unpaved" on car roads gravel, regional gravel for untagged minor roads
 
 
 def _facts_baked(feats, kind, extra):
@@ -2465,7 +2467,8 @@ def shift_at(shifts, lon, lat):
 
 
 def _spec_json(sp):
-    return {f: (v.item() if hasattr(v, "item") else list(v) if isinstance(v, tuple) else v)
+    return {f: (v.item() if hasattr(v, "item") else [list(e) if isinstance(e, tuple) else e for e in v]
+                if isinstance(v, tuple) else v)
             for f, v in sp._asdict().items()}
 
 
@@ -2474,30 +2477,112 @@ def _specs_from(data, n):
     if not isinstance(data, list) or len(data) != n:
         return None
     try:
-        return [None if d is None else Spec(**{**d, "sides": tuple(d["sides"]) if d.get("sides") is not None else None})
-                for d in data]
-    except (TypeError, KeyError):
+        return [None if d is None else spec_from(d) for d in data]
+    except (TypeError, KeyError, ValueError):
         return None
 
 
-# OpenStreetMap's sidewalk tag (osmtags.py) -> walk_sides' sides; "separate" (a footway mapped on its own beside the
-# road) and "no" give none. Other values (or none) leave the class and land-cover rule.
-SIDEWALK_TAG = {"both": (1, -1), "left": (1,), "right": (-1,), "no": (), "none": (), "separate": ()}
+def spec_from(d):
+    """The Spec of its JSON form (_spec_json: the tuples are lists there)."""
+    return Spec(**{**d, "sides": tuple(d["sides"]) if d.get("sides") is not None else None,
+                   "sep": tuple((int(s), float(at), float(w)) for s, at, w in d["sep"]) if d.get("sep") else None})
 
 
-def _osm_sidewalks(feats, specs):
-    """specs with sides set where OpenStreetMap's sidewalk tag says which (SIDEWALK_TAG). Pure."""
+# OpenStreetMap's sidewalk tag (osmtags.py) -> walk_sides' sides; "no" gives none. Other values (or none) leave the
+# class and land-cover rule. "separate" (a footway mapped as a way of its own beside the road): _osm_sidewalks.
+SIDEWALK_TAG = {"both": (1, -1), "left": (1,), "right": (-1,), "no": (), "none": ()}
+SEPARATE_TAG = "separate"
+# Sidewalks mapped on their own (walksetback.py; the user, 2026-11-13, Lublin's Puchacza at 51.2335 N 22.5880 E: "the
+# sidewalk is rendered as asphalt or road": nearly every way of it says sidewalk=separate, its sidewalk is a footway
+# two metres behind a strip of grass, footways are not drawn and "separate" was read as "none"). A road that says
+# "separate" has sidewalks: on the sides a footway, path or cycleway runs along (Spec.sep: at its distance from the
+# road, as wide as it is mapped, the verge between left as ground), and where the map shows none beside it at all,
+# the class's own sidewalk at the curb on both sides (a footway further than walksetback.REACH_M from the carriageway
+# is not known to be the street's: the sidewalk is then drawn where sidewalks are, not 10 m off behind a hedge, and
+# not left out, which is the bare street the report was about). A road with no sidewalk tag keeps the class and
+# land-cover rule, its sidewalks moved out to the footways beside it the same way (sidewalk:left / :right = separate
+# are tags the Layercake file does not carry: the footway itself says where the sidewalk is).
+# BNE_WALK_SETBACK=off: "separate" is the class's sidewalk at the curb, no footway looked at.
+WALK_SETBACK = os.environ.get("BNE_WALK_SETBACK", "on") not in ("off", "0")
+SEP_FRONT_M = 0.5       # m a mapped sidewalk's outer edge may lie past the measured building fronts (_measured_widths)
+SEP_MIN_GAP_M = 0.4     # m of verge under which a mapped sidewalk is one at the curb (walk_at)
+
+
+def _osm_sidewalks(feats, specs, left_hand=False):
+    """specs with sides set where OpenStreetMap's sidewalk tag says which (SIDEWALK_TAG), and sep where the sidewalk
+    is a footway mapped beside the road (walksetback.measure). Pure."""
     tags = feats.attrs.get("osm_sidewalk")
-    if tags is None:
-        return specs
     out = list(specs)
+    separate, ruled = [], []
     for i, sp in enumerate(out):
         if sp is None or sp.kind not in BUILT:
             continue
-        tag = str(tags[i]).strip().lower()
+        tag = str(tags[i]).strip().lower() if tags is not None else ""
         if tag in SIDEWALK_TAG:
             out[i] = sp._replace(sides=SIDEWALK_TAG[tag])
+        elif tag == SEPARATE_TAG:
+            separate.append(i)
+        elif has_sidewalks(sp):
+            ruled.append(i)
+    if not separate and not ruled:
+        return out
+    found = {}
+    if WALK_SETBACK and "class" in feats.attrs:
+        import walksetback
+        cls = feats.attrs["class"]
+        sub = feats.rules.get("subclass")
+        paths, path_w = [], {}
+        for i in range(len(feats)):
+            if str(cls[i]) not in walksetback.CLASSES or _rule_value(sub, i) in walksetback.NOT_BESIDE:
+                continue
+            if surface_kind(str(cls[i]), _surface_value(feats, i)) not in BUILT:
+                continue                        # (a trodden path along the road is not its sidewalk)
+            if raw_level_ranges(feats, i):
+                continue                        # (an underpass along the street, a footbridge: not at its side)
+            paths.append(i)
+            w = _rule_value(feats.rules.get("width"), i)
+            w = float(w) if w is not None else _osm(feats, "width", i)
+            if w is not None and walksetback.WIDTHS_M[0] <= w <= walksetback.WIDTHS_M[1]:
+                path_w[i] = min(w, walksetback.WIDTH_MAX_M)
+        if paths:
+            found = walksetback.measure(feats, separate + ruled, paths,
+                                        {i: out[i].width / 2 for i in separate + ruled}, path_w)
+    for i in separate:
+        sp = out[i]
+        default = walk_sides(sp, left_hand)     # (a divided road's carriageway: its outer side alone)
+        got = {s: v for s, v in found.get(i, {}).items() if s in default}
+        if got:                                 # (mapped along one side only: that side has the street's sidewalk)
+            out[i] = sp._replace(sides=tuple(s for s in default if s in got), sep=_sep(got))
+        else:                                   # (none at an expressway's carriageway, as the class rule: has_sidewalks)
+            fast_road = limited_access(sp) or (sp.oneway and sp.kmh is not None and sp.kmh >= NO_WALK_KMH)
+            out[i] = sp._replace(sides=() if fast_road else tuple(default))
+    for i in ruled:
+        got = {s: v for s, v in found.get(i, {}).items() if s in walk_sides(out[i], left_hand)}
+        if got:
+            out[i] = out[i]._replace(sep=_sep(got))
     return out
+
+
+def _sep(got):
+    return tuple((int(s), round(float(at), 2), round(float(w), 2)) for s, (at, w) in sorted(got.items())) or None
+
+
+def walk_at(spec, side):
+    """(m of verge between the carriageway's edge and the sidewalk on `side` of a road, the sidewalk's width m): 0 and
+    the road's own width (Spec.walk), or where its sidewalk is mapped beside it (Spec.sep), that footway's. Pure."""
+    for s, at, w in getattr(spec, "sep", None) or ():
+        if s == side:
+            gap = at - w / 2 - spec.width / 2
+            if gap >= SEP_MIN_GAP_M:
+                return float(gap), float(w)
+    return 0.0, spec.walk
+
+
+def walk_reach(spec, side=None):
+    """m from the carriageway's edge to the outer edge of the sidewalk on `side` (None: the further side's)."""
+    if not getattr(spec, "sep", None):
+        return spec.walk
+    return max(sum(walk_at(spec, s)) for s in ((1, -1) if side is None else (side,)))
 
 
 UNBUILT_SHARE = 0.5     # a feature Overture flags is_under_construction over this share of its length is not built
@@ -2649,7 +2734,7 @@ def _road_specs(feats, urban_fn, left_hand):
             w = carriageway(sp.cls, sp.kind, False, width, sp.oneway, sp.lanes, link=sp.link)
             out[j] = sp._replace(urban=False, width=_dual_width(sp._replace(urban=False), w, sp.median, feats, j))
     import franceroads
-    return franceroads.adjust_specs(feats, _mountain_roads(feats, _osm_sidewalks(feats, _rural_connectors(feats, out))))
+    return franceroads.adjust_specs(feats, _mountain_roads(feats, _osm_sidewalks(feats, _rural_connectors(feats, out), left_hand)))
 
 
 # Mountain pass roads (the user, 2026-10-31: the Stelvio Pass; its aerial: 6.1 m of asphalt between edge lines, no
@@ -2896,7 +2981,10 @@ def _measured_widths(feats, specs, widths):
         # kept a default carriageway wider than the street itself.
         minimum = 3.0 if sp.cls in {"residential", "living_street", "unclassified", "tertiary"} else 0.6 * dflt
         if m is not None and minimum <= m[0] <= MEASURE_MAX * dflt:
-            out[j] = sp._replace(width=m[0], walk=m[1])
+            # (a footway mapped beyond the building fronts measured here is in an arcade or a passage: the street's
+            # sidewalk is then the one between its curb and the fronts)
+            sep = tuple(e for e in sp.sep or () if e[1] + e[2] / 2 <= m[0] / 2 + m[1] + SEP_FRONT_M) or None
+            out[j] = sp._replace(width=m[0], walk=m[1], sep=sep)
     return out
 
 
@@ -4812,6 +4900,18 @@ def sidewalk_stop(spec, fid, other, ofid):
     return other.width / 2
 
 
+def walk_blocker(spec, fid, other, ofid, line, left_hand=False):
+    """sidewalk_stop as a cut (centre line (k, 2), half width) along the crossing road's line: where that road's
+    sidewalks are mapped beside it (Spec.sep) each side's own reach, the verge and the sidewalk beyond it (a line
+    moved to the middle of the two outer edges)."""
+    stop = sidewalk_stop(spec, fid, other, ofid)
+    if not getattr(other, "sep", None) or stop <= other.width / 2:
+        return line[:, :2], stop
+    sides = walk_sides(other, left_hand)
+    left, right = (walk_reach(other, s) if s in sides else 0.0 for s in (1, -1))
+    return offset_polyline(line, (left - right) / 2)[:, :2], other.width / 2 + (left + right) / 2
+
+
 def _motesfri_section(spec, osm):
     import motesfri
     return motesfri.is_section(spec, osm)
@@ -4884,8 +4984,9 @@ def extras(spec, pts, lon, left_hand=False, country=None, osm=None, ws=None, shi
         return out
     if has_sidewalks(spec):
         for side in walk_sides(spec, left_hand):
-            out.append(({**SIDEWALK, "side": side}, spec.walk,
-                        offset_polyline(pts, side * (wv / 2 + spec.walk / 2))))
+            gap, ww = walk_at(spec, side)       # (mapped beside the road: there, a verge between)
+            out.append(({**SIDEWALK, "side": side, "gap": gap}, ww,
+                        offset_polyline(pts, side * (wv / 2 + gap + ww / 2))))
             out.append(({**GUTTER, "side": side}, GUTTER["w"], offset_polyline(pts, side * (wv / 2 - GUTTER["w"] / 2))))
         ms = median_side(spec, left_hand)
         if ms is not None:
@@ -5046,8 +5147,9 @@ def extras(spec, pts, lon, left_hand=False, country=None, osm=None, ws=None, shi
     return out
     if has_sidewalks(spec):
         for side in walk_sides(spec, left_hand):
-            out.append(({**SIDEWALK, "side": side}, spec.walk,
-                        offset_polyline(pts, side * (w / 2 + spec.walk / 2))))
+            gap, ww = walk_at(spec, side)
+            out.append(({**SIDEWALK, "side": side, "gap": gap}, ww,
+                        offset_polyline(pts, side * (w / 2 + gap + ww / 2))))
             out.append(({**GUTTER, "side": side}, GUTTER["w"], offset_polyline(pts, side * (w / 2 - GUTTER["w"] / 2))))
         ms = median_side(spec, left_hand)
         if ms is not None:
@@ -5190,7 +5292,7 @@ def join_walk_ends(runs, carriageways):
         o0 = ri["open"][0] if ei else ri["open"][1]
         o1 = rj["open"][1] if not ej else rj["open"][0]
         runs[ki] = {"pts": densify(simplify(pts)), "side": si, "w": ri["w"], "fid": ri["fid"], "j": (j0, j1),
-                    "median": bool(ri.get("median")), "open": (o0, o1), "ramp_keys": sorted(set(ri.get("ramp_keys", [(ri["fid"], ri["side"])])
+                    "median": bool(ri.get("median")), "gap": ri.get("gap", 0.0), "open": (o0, o1), "ramp_keys": sorted(set(ri.get("ramp_keys", [(ri["fid"], ri["side"])])
                                                                + rj.get("ramp_keys", [(rj["fid"], rj["side"])])))}
         runs[kj] = None
         alias[kj] = ki
@@ -8674,6 +8776,10 @@ def deck_walks(feats, i, ground_specs, left_hand=False):
     a ground part going on from it, along a chain of roads all bridge (DECK_WALK_CHAIN at most), on the side of the
     deck they are on: a deck between two others had none, its neighbours theirs, a 2.5 m step in the bridge's width
     (Baltimore by the Jones Falls Expressway, deckedges.py 2026-10-31). Pure."""
+    tag = feats.attrs.get("osm_sidewalk")
+    tag = str(tag[i]).strip().lower() if tag is not None else ""
+    if tag == SEPARATE_TAG:     # (its sidewalk is a way of its own, with a bridge of its own: none on this deck)
+        return None
     gs = ground_specs[i]
     if gs is not None:
         return (float(gs.walk), tuple(walk_sides(gs, left_hand))) if has_sidewalks(gs) else None
@@ -8683,8 +8789,7 @@ def deck_walks(feats, i, ground_specs, left_hand=False):
     # (the bridge's own way says it has none, sidewalk=no / none / separate: not its neighbours' then. Warsaw's
     # Trasa Siekierkowska flyovers, sidewalk=no on every one, 2026-11-13: each carried a paved strip either side from
     # the 50 km/h streets they come down to, 5 m more deck between the parapets)
-    tag = feats.attrs.get("osm_sidewalk")
-    if tag is not None and SIDEWALK_TAG.get(str(tag[i]).strip().lower()) == ():
+    if SIDEWALK_TAG.get(tag) == ():
         return None
     cls = bridge[i].cls
     nodes, ends = _end_nodes(feats)
@@ -9420,10 +9525,9 @@ def build_tile(frame, tx, ty, cells, elev, urban_fn=None, walks=None, bridges=No
                                                       EDGE_DECAL["w"] + EDGE_DECAL_GAP_M))
                           for f2, s2, p2, _ in roads if f2 != fid and s2.kind in BUILT]
         # ring roads: sidewalks stop ENTRY_CLEAR_M outside the carriageway (no stub into the circle)
-        walk_blockers = [(p2[:, :2],
-                          (s2.width / 2 + (islands.ENTRY_CLEAR_M if f2 in ring_dir else 0.0)
-                           if (fid, f2) in cornered or f2 in ring_dir
-                           else sidewalk_stop(spec, fid, s2, f2)))
+        walk_blockers = [((p2[:, :2], s2.width / 2 + (islands.ENTRY_CLEAR_M if f2 in ring_dir else 0.0))
+                          if (fid, f2) in cornered or f2 in ring_dir
+                          else walk_blocker(spec, fid, s2, f2, p2, left_hand))
                          for f2, s2, p2, _ in roads if f2 != fid] + list(walk_cuts) + trams
         crossing_rails = [c for c in rail_cuts if railways.crosses(pts[:, :2], c[0])]
         walk_blockers += crossing_rails
@@ -9478,7 +9582,7 @@ def build_tile(frame, tx, ty, cells, elev, urban_fn=None, walks=None, bridges=No
                             at_j0 = j0 and np.hypot(*(run[0, :2] - cpiece[0, :2])) < 0.6
                             at_j1 = j1 and np.hypot(*(run[-1, :2] - cpiece[-1, :2])) < 0.6
                             runs_near.append({"pts": run, "side": side, "w": w, "fid": fid, "j": (at_j0, at_j1),
-                                              "median": bool(look.get("median")),
+                                              "median": bool(look.get("median")), "gap": look.get("gap", 0.0),
                                               "open": (not _on_box(run[0], near), not _on_box(run[-1], near))})
                 continue
             if walks is not None and look["m"] == GUTTER["m"]:     # gutters end where their curb turns
@@ -9529,8 +9633,12 @@ def build_tile(frame, tx, ty, cells, elev, urban_fn=None, walks=None, bridges=No
                 ramps = junctions.ramp_ranges(run, rl)
                 walks.append({"pts": run, "side": side, "caps": caps, "ramps": ramps, "w": w, "fid": fid,
                               "median": rn.get("median", False)})
+                if rn.get("gap"):                       # (mapped beside the road: m of verge to the carriageway)
+                    walks[-1]["gap"] = float(rn["gap"])
                 if not rn.get("median"):                # (a median: a bare curb, no storm drains)
-                    drain_runs.append((walks[-1], side, (caps[0] or at_j0, caps[1] or at_j1), w))
+                    # (the drains in the gutter at the carriageway's edge, a verge's width from the sidewalk)
+                    drain_runs.append((walks[-1], side, (caps[0] or at_j0, caps[1] or at_j1),
+                                       w + 2 * float(rn.get("gap") or 0.0)))
         if walks is not None and pole_profile is not None:
             import poleprofiles
             european = poleprofiles.europe_selector(pole_profile, frame)
