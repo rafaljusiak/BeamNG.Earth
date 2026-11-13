@@ -116,7 +116,7 @@ class RegionStyleTest(unittest.TestCase):
         self.assertNotIn(bld.OFFICE, tall.facade, "no glass blocks of flats")
         self.assertEqual(tall.band, bld.BAND_PANEL)
         floors = {bld.plan(slab + k * 100, {"class": "apartments"}, lat=52.15, lon=21.05).floors for k in range(60)}
-        self.assertEqual(floors, {4, 5, 10, 11}, "no height mapped: a slab of 4-5 or 10-11")
+        self.assertEqual(floors, {4, 5}, "no height mapped: a slab of 4-5")
         ten = bld.plan(rect(0, 0, 20, 16), {"class": "apartments", "height": 20.0}, neighbours=2, lat=52.23,
                        lon=21.01, dense=True)
         self.assertIsNone(ten.block)
@@ -127,6 +127,22 @@ class RegionStyleTest(unittest.TestCase):
         us = bld.plan(slab, {"class": "apartments", "height": 30.8}, lat=39.29, lon=-76.61)
         self.assertIsNone(us.block, "the US as before")
         self.assertEqual(us.floors, 10)
+
+    def test_poland_unmapped_blocks_are_low(self):
+        # Zabki, Chelmzynska (52.27571 N 21.11648 E, 2026-11-13): apartments with no height or floors mapped, 380 m2
+        # and square ("tower") or long ("slab"), came out 11-16 and 10-11 storeys where nothing is over 4-6
+        for name, r in (("tower", rect(0, 0, 20, 19)), ("slab", rect(0, 0, 60, 15)), ("big", rect(0, 0, 50, 48))):
+            for cls in ("apartments",):     # (residential and dormitory are house classes first)
+                for attrs in ({"class": cls}, {"class": cls, "height": float("nan"), "num_floors": float("nan")}):
+                    ss = [bld.plan(r + k * 100, dict(attrs), lat=52.2757, lon=21.1165) for k in range(80)]
+                    self.assertEqual({s.floors for s in ss}, set(bld.BLOCK_PREDICTED_FLOORS), (name, cls))
+                    self.assertLessEqual(max(s.height for s in ss), 5 * 2.8 + 0.6 + 1e-6, (name, cls))
+                    self.assertTrue(all(s.block for s in ss), "still a block of flats' look")
+        self.assertLessEqual(max(bld.BLOCK_PREDICTED_FLOORS), 5)
+        s = bld.plan(rect(0, 0, 20, 19), {"class": "apartments", "num_floors": 15}, lat=52.2757, lon=21.1165)
+        self.assertEqual((s.floors, s.block), (15, "tower"), "mapped floors are kept")
+        s = bld.plan(rect(0, 0, 20, 19), {"class": "apartments", "height": 42.0}, lat=52.2757, lon=21.1165)
+        self.assertEqual(s.floors, 15, "a mapped height too")
 
     def test_one_block_one_colour(self):
         def spec(r, look):

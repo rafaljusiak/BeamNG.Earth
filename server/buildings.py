@@ -651,6 +651,8 @@ BLOCK_SLAB_FLOORS, BLOCK_TOWER_FLOORS = 4, 8
 BLOCK_TENEMENT_FLOORS = 6           # an attached residential building in a dense core up to this high: a tenement
 BLOCK_TENEMENT_M = 24.0             # ... or this high (its eaves)
 BLOCK_PREDICTED_M2 = 300.0          # m²: a block of flats with no height or floors mapped is at least this large
+BLOCK_PREDICTED_FLOORS = (4, 5)     # ... and this high: the first for BLOCK_PREDICTED_LOW of them (hashed), else the second
+BLOCK_PREDICTED_LOW = 0.55
 
 
 def _block(cls, area, hl, hw, box_fill, floors, predicted, neighbours=0, dense=False, height=None):
@@ -859,10 +861,14 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
                        predicted, neighbours, dense, None if nf is not None else h)
     if block is not None:
         floor_h = style.block_floor_m
-        if predicted:               # (no height, no floors mapped: a slab of 4-5 or 10-11, a tower of 11-16)
-            u = _hash01(seed, "block floors")
-            nf = (4 if u < 0.3 else 5 if u < 0.65 else 10 if u < 0.8 else 11) if block == "slab" \
-                else 11 + int(u * 6)
+        if predicted:
+            # no height, no floors mapped: 4 or 5, slab or tower, never a high-rise. (It was 4, 5, 10 or 11 for a slab
+            # and 11-16 for a tower: Zabki by Warsaw, Chelmzynska at 52.27571 N 21.11648 E, 2026-11-13, the user: "no
+            # building here is taller than 4 floors". Its 380 m2 square blocks of flats, mapped as apartments and
+            # nothing else, stood 11-16 storeys, 31-45 m; GUGiK's LoD2 has them 15.8-18.9 m and the long ones
+            # 11.6-15.0 m. Where floors go unmapped is the suburbs' and small towns' new low blocks; the cities'
+            # high-rises have them mapped, and a tall block guessed low is a smaller error than a tower on a low estate)
+            nf = BLOCK_PREDICTED_FLOORS[0 if _hash01(seed, "block floors") < BLOCK_PREDICTED_LOW else 1]
     elif (style.attached_floor_m and neighbours >= 1 and cls in BLOCK_CLASSES and not row
           and not (shop or industrial or shed or barn or church or garage or terminal)):
         floor_h = style.attached_floor_m        # an old town's tenement
