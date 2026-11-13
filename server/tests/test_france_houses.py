@@ -288,8 +288,14 @@ class HouseTest(unittest.TestCase):
             def cell(self, key, layers=(), kind="demand"):
                 calls.append(layers)
                 return SimpleNamespace(layers={})
-        self.assertEqual(b.road_tile_items(geodesy.EnuFrame(39., -76.), 0, 0, MD(), lambda la, lo: np.zeros(np.shape(la))), ([], []))
-        self.assertFalse(any("land_use" in ls for ls in calls))
+        frame = geodesy.EnuFrame(39., -76.)
+        self.assertEqual(b.road_tile_items(frame, 0, 0, MD(), lambda la, lo: np.zeros(np.shape(la))), ([], []))
+        # a road tile reads its cells' land use for the market grounds (buildings.MarketLand): a layer roads.tile_needs
+        # asks for with every road tile, so no fetch of its own; the far tiles, which would fetch it, do not
+        warmed = {layer for _key, layer in roads.tile_needs(frame, 0, 0)}
+        self.assertTrue(calls and all(set(ls) <= warmed for ls in calls))
+        self.assertNotIn("land_use", b.far_needs(frame, 0, 0)[1])
+        self.assertFalse(fr.needs_residential_land(frame, roads.tile_bbox(0, 0)))
 
     def test_mesh_builder_accepts_an_iterator_without_losing_buildings(self):
         item = (self.plan(), 0., 0.)
