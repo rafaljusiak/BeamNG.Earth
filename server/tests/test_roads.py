@@ -131,6 +131,18 @@ class RulesTest(unittest.TestCase):
         rural = roads.road_specs(features([[(0, 0), (100, 0)]], ["residential"]))[0]
         self.assertFalse(roads.has_sidewalks(rural))                                     # untagged, rural: none
 
+    def test_a_bridge_tagged_without_sidewalks_takes_none_from_the_street_it_meets(self):
+        # Warsaw's Trasa Siekierkowska flyovers (sidewalk=no) carried the sidewalks of the streets they come down to
+        town = lambda lat, lon: np.ones(len(lat), bool)                                  # noqa: E731
+        got = {}
+        for tag in ("", "no", "separate"):
+            f = features([[(-100, 0), (0, 0)], [(0, 0), (100, 0)]], ["primary", "primary"], flags=[(1, "is_bridge")])
+            f.attrs["osm_sidewalk"] = np.array(["", tag], object)
+            got[tag] = roads.deck_walks(f, 1, roads.road_specs(f, urban_fn=town))
+        self.assertEqual(got[""], (2.5, (1, -1)))            # untagged: its street's, as before
+        self.assertIsNone(got["no"])
+        self.assertIsNone(got["separate"])
+
     def test_limited_access_roads_get_no_sidewalks_in_a_built_up_cover(self):
         # a cloverleaf's ramps (few junctions) and a fast one-way primary beside a town's edge were drawn with
         # sidewalks; a slow one-way primary / trunk, a town street and a tagged sidewalk keep theirs

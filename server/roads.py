@@ -8634,6 +8634,12 @@ def deck_walks(feats, i, ground_specs, left_hand=False):
     bridge = bridge_specs(feats)
     if bridge[i] is None:
         return None
+    # (the bridge's own way says it has none, sidewalk=no / none / separate: not its neighbours' then. Warsaw's
+    # Trasa Siekierkowska flyovers, sidewalk=no on every one, 2026-11-13: each carried a paved strip either side from
+    # the 50 km/h streets they come down to, 5 m more deck between the parapets)
+    tag = feats.attrs.get("osm_sidewalk")
+    if tag is not None and SIDEWALK_TAG.get(str(tag[i]).strip().lower()) == ():
+        return None
     cls = bridge[i].cls
     nodes, ends = _end_nodes(feats)
     seen, frontier = {i}, [(i, False)]          # (feature, whether its direction runs against i's)
