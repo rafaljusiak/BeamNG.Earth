@@ -110,6 +110,7 @@ FEATURES = {
     "canopy:lidarbc-chm": "LidarBC (OGL-BC)",
     "sea:noaa": "NOAA NCEI", "bridge:nbi": "FHWA NBI", "bridge:wikidata": "Wikidata",
     "model:3dmr": "3D Model Repository (3dmr.eu)",
+    "model:gugik_lod2": "GUGiK 3D building models (CC BY 4.0)",
     "air:ourairports": "OurAirports", "grav:egm2008": "NGA EGM2008", "climate:beck-kg": "Beck et al. (Koppen-Geiger)",
 }
 SHORT.update(FEATURES)
@@ -236,6 +237,15 @@ def feature_ids(conn):
             import threedmr
             if threedmr.credited_near(lat, lon, FEATURE_NEAR_M, getattr(s, "root", None)):
                 ids.add("model:3dmr")
+        except Exception:
+            pass
+        try:                        # (GUGiK's models of Poland: the bundled sheet index, no download)
+            import pl_lod2
+            if pl_lod2.ON:
+                dlat = FEATURE_NEAR_M / 110540.0
+                dlon = FEATURE_NEAR_M / (111320.0 * max(0.1, math.cos(math.radians(lat))))
+                if pl_lod2.covered(lat - dlat, lon - dlon, lat + dlat, lon + dlon):
+                    ids.add("model:gugik_lod2")
         except Exception:
             pass
     ap = getattr(s, "airports", None)

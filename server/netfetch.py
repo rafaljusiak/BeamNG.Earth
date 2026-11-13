@@ -273,6 +273,12 @@ POLICIES = {
     "nvdbapiles.atlas.vegvesen.no": HostPolicy(rate=2.0, burst=4.0, max_conc=2, daily_budget=3000, daily_hard=6000,
                                                allow_prefetch=True, offline_ok=True, miss_ttl=None, timeout=30.0,
                                                max_attempts=3, base_delay=2.0, optional=True),
+    # GUGiK's 3D building models of Poland (pl_lod2.py, BNE_PL_LOD2=on): one Range request per 1:5,000 sheet (its entry
+    # in the powiat's zip, ~0.1-3 MB), parsed once and kept on disk; a government host with no published limits: modest
+    "opendata.geoportal.gov.pl": HostPolicy(rate=2.0, burst=4.0, max_conc=2, daily_budget=2000, daily_hard=4000,
+                                            allow_prefetch=True, offline_ok=True, miss_ttl=30 * DAY, binary=True,
+                                            timeout=60.0, max_attempts=3, base_delay=2.0, breaker_threshold=6,
+                                            breaker_window=120.0, optional=True),
     # never at runtime (OSM Overpass, OSMF vector tiles, Protomaps builds): §3.3
     "overpass-api.de": HostPolicy(denied=True, daily_hard=0),
     "vector.openstreetmap.org": HostPolicy(denied=True, daily_hard=0),
@@ -345,6 +351,7 @@ ROLES = {
     "gis.ngdc.noaa.gov": "sea depths; new coasts get a plain sloping sea floor meanwhile",
     "davidmegginson.github.io": "the airport list; the copy on disk is used meanwhile",
     "data.openstreetmap.us": "road details from OpenStreetMap (lanes, widths, sidewalks); estimated meanwhile",
+    "opendata.geoportal.gov.pl": "Poland's 3D building models (GUGiK); the map's buildings meanwhile",
     "s3-us-west-2.amazonaws.com": "US lidar for bridge deck heights; estimated meanwhile",
     "nvdbapiles.atlas.vegvesen.no": "Norway's measured road, bridge and tunnel heights; estimated meanwhile",
     "tecnagamer.github.io": "railway details, US railroad crossing equipment and lane markings; estimated meanwhile",

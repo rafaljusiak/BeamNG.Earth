@@ -341,7 +341,7 @@ def oriented_box(p):
 class Spec:
     """What is built for one footprint (decided by plan())."""
     __slots__ = ("ring", "floors", "floor_h", "height", "roof", "roof_mat", "facade", "band", "shop", "plain", "min_h", "wall", "door", "windows", "front", "steeple", "stoop",
-                 "sign", "porch", "cls", "seed", "deck", "pitch", "portal", "gring", "ship", "fr_house")
+                 "sign", "porch", "cls", "seed", "deck", "pitch", "portal", "gring", "ship", "fr_house", "lod2")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -555,6 +555,7 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
     if attrs.get("pier"):           # a quay structure alongside one (ships.pier_alongside): a low deck
         return ships.pier_spec(ring, seed)
     style = region_style(lat, lon)
+    lod2 = attrs.get("lod2") is not None    # (pl_lod2: the height given is the model's eaves, its roof modelled)
     _, _, hl, hw = oriented_box(ring)
     box_fill = area / max(4 * hl * hw, 1e-6)
     cls = (attrs.get("class") or "").lower()
@@ -686,8 +687,8 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
     if roof in DOME_ROOFS:
         if hw < 1.0 or hw > DOME_MAX_HW:
             roof = "flat"
-    elif roof != "flat" and (box_fill < (0.6 if church else 0.8) or hw < 2.0
-                             or hw > (18.0 if barn else 20.0 if church else 14.0)):
+    elif roof != "flat" and not lod2 and (box_fill < (0.6 if church else 0.8) or hw < 2.0
+                                          or hw > (18.0 if barn else 20.0 if church else 14.0)):
         roof = "flat"
     # a city tower's ground floor is shops or a lobby (Midtown, 2026-10-14: most towers have no class, and their
     # curtain wall came down to the pavement)
@@ -705,7 +706,7 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
             h = max(2.5, h - dome_rise(roof, hw, attrs.get("roof_height")))
         elif attrs.get("roof_height") and np.isfinite(attrs["roof_height"]) and roof != "flat":
             h = max(2.5, h - float(attrs["roof_height"]))
-        elif roof != "flat":
+        elif roof != "flat" and not lod2:
             h = max(2.5, h - roof_rise(roof, hw, style.pitch or PITCH.get(roof, PITCH["gabled"])))
         if nf is None:
             # a church: one tall storey (Cluj's St. Michael's, 25 m, came out as three 8 m floors)
@@ -1104,6 +1105,8 @@ def drawn_ring(spec):
     porch go on these walls (on the map's outline they stood off a box wall at an angle, or inside it, only the
     door's frame showing: Stelvio pass, the user's reports 2026-10-17)."""
     ring = spec.ring
+    if spec.lod2 is not None:       # (a LoD2 model: its own walls, on its outline)
+        return ring
     if spec.roof != "flat" and spec.roof not in DOME_ROOFS:     # (a dome stands on its own round drum)
         if spec.fr_house:
             import francehouse_mesh
@@ -1734,6 +1737,10 @@ def build(specs_and_ground, lite=False):
             landmarks.build(m, spec, gmin, _landmark_token(spec), lite, _landmark_tokens())
             continue
         mat_idx = _Looks(spec.seed)
+        if spec.lod2 is not None:           # GUGiK's model (pl_lod2)
+            import pl_lod2_mesh
+            pl_lod2_mesh.draw(m, spec, gmin, gmax, mat_idx, lite)
+            continue
         if spec.fr_house:
             import francehouse_mesh
             francehouse_mesh.draw(m, spec, gmin, gmax, mat_idx, lite)
@@ -1821,6 +1828,10 @@ def collision_mesh(specs_and_ground):
     tok = (MATERIALS.index(PANEL), (128, 128, 128, 255))
     zero = (0.0, 0.0)
     for spec, gmin, gmax in specs_and_ground:
+        if spec.lod2 is not None:
+            import pl_lod2_mesh
+            pl_lod2_mesh.draw(m, spec, gmin, gmax, None, collision=True, tok=tok)
+            continue
         if spec.fr_house:
             import francehouse_mesh
             francehouse_mesh.draw(m, spec, gmin, gmax, _Looks(spec.seed), collision=True)
@@ -2643,10 +2654,110 @@ def _outline_under_parts(at, bparts):
     return bool(own) and all(p[1] is None or p[1][1] <= PARTS_GROUND_M for p in bparts)
 
 
+LOD2_COVER = 0.5           # a map footprint this much inside GUGiK's models is left out (they stand there)
+LOD2_MARGIN_M = 60.0       # m round a tile the map's footprints are looked at for its models' attributes
+LOD2_SAMPLES = 120         # about this many grid points inside a footprint (its share inside models)
+LOD2_FLAT = 0.6            # a model with this share of its roof flat has a flat roof's look (plan: no roof tiles)
+LOD2_MIN_M2 = 4.0          # m²: a smaller model (a kiosk's corner, a sliver) is left out
+LOD2_LENT = ("class", "subtype", "num_floors", "name", "facade_material", "facade_color", "roof_material",
+             "roof_color")     # what a model takes from the footprints it replaces (not their heights: its own)
+
+
+class _Lod2:
+    """GUGiK's models round a tile (pl_lod2.Model, shifted into the tile's frame) and what the map's footprints lend
+    them. A footprint mostly inside models (LOD2_COVER, of grid points inside it) is replaced: each model it falls in
+    gets its attributes, weighted by the area that falls in it (replaces); a model's class is its donors' area-weighted
+    majority, its floors and colours its largest donor's (attrs). A landmark's or a canopy's footprint takes the models
+    whose centre is in it away (suppress). Footprints mostly outside models stay (buildings built after the scan)."""
+
+    def __init__(self, models, x0, y0):
+        self.models = [m.shifted(-x0, -y0) for m in models]
+        self.box = np.array([(*m.ring.min(0), *m.ring.max(0)) for m in self.models], np.float64).reshape(-1, 4)
+        self.cent = np.array([m.ring.mean(0) for m in self.models], np.float64).reshape(-1, 2)
+        self.paths = {}
+        self.donors = {}            # model index -> [(weight m², attrs)]
+        self.gone = set()
+
+    def _path(self, k):
+        p = self.paths.get(k)
+        if p is None:
+            from polygon import Path
+            p = self.paths[k] = Path(self.models[k].ring)
+        return p
+
+    def _near(self, ring):
+        lo, hi = ring.min(0), ring.max(0)
+        b = self.box
+        return np.flatnonzero((b[:, 2] >= lo[0]) & (b[:, 0] <= hi[0]) & (b[:, 3] >= lo[1]) & (b[:, 1] <= hi[1]))
+
+    def suppress(self, ring):
+        from polygon import Path
+        near = self._near(ring)
+        if len(near):
+            inside = Path(ring).contains_points(self.cent[near])
+            self.gone.update(int(k) for k in near[np.asarray(inside, bool)])
+
+    def replaces(self, ring, at):
+        """Whether the footprint ring (k, 2, the tile's frame) is mostly inside models (then lent to them)."""
+        from polygon import Path
+        near = self._near(ring)
+        if not len(near):
+            return False
+        area = abs(_area2(ring)) / 2
+        lo, hi = ring.min(0), ring.max(0)
+        step = max(math.sqrt(max(area, 1e-6) / LOD2_SAMPLES), 0.25)
+        gx, gy = np.meshgrid(np.arange(lo[0] + step / 2, hi[0], step), np.arange(lo[1] + step / 2, hi[1], step))
+        g = np.stack([gx.ravel(), gy.ravel()], 1)
+        g = g[Path(ring).contains_points(g)] if len(g) else g
+        if not len(g):
+            g = ring.mean(0)[None]
+        hit = np.zeros(len(g), bool)
+        per = []
+        for k in near:
+            h = np.asarray(self._path(int(k)).contains_points(g), bool) & ~hit
+            if h.any():
+                per.append((int(k), int(h.sum())))
+                hit |= h
+        if hit.mean() < LOD2_COVER:
+            return False
+        for k, c in per:
+            self.donors.setdefault(k, []).append((area * c / len(g), at))
+        return True
+
+    def own(self, w, h, owns=None):
+        """(index, model) of the models the tile [0, w) x [0, h) (or owns(x, y)) has: their outline's centre in it."""
+        for k, m in enumerate(self.models):
+            if k in self.gone or abs(_area2(m.ring)) / 2 < LOD2_MIN_M2:
+                continue
+            cx, cy = float(self.cent[k][0]), float(self.cent[k][1])
+            if (0 <= cx < w and 0 <= cy < h) if owns is None else owns(cx, cy):
+                yield k, m
+
+    def attrs(self, k):
+        """plan()'s attributes of model k: its donors' (see the class) and its own height, roof and id."""
+        m = self.models[k]
+        don = sorted(self.donors.get(k, []), key=lambda d: -d[0])
+        at = dict(don[0][1]) if don else {}
+        votes = {}
+        for wgt, a in don:
+            c = str(a.get("class") or "").lower()
+            if c:
+                votes[c] = votes.get(c, 0.0) + wgt
+        at["class"] = max(votes, key=lambda c: (votes[c], c)) if votes else None
+        nf = at.get("num_floors")
+        if nf is not None and not (np.isfinite(nf) and nf > 0):
+            at["num_floors"] = None
+        h = m.eave if m.eave >= 2.0 else m.top
+        at.update(height=max(h, 2.0), roof_shape="flat" if m.flat >= LOD2_FLAT else "gabled", lod2=k,
+                  seed_id=f"lod2:{m.id}", min_height=None, roof_height=None)
+        return at
+
+
 @profile_step('Building site selection')
 def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=(), west_town=False, roads_xy=None,
                    tunnels_xy=None, garages_xy=None, supports=None, bridges_xy=None, water_xy=None, decks=None,
-                   ml_roads_xy=None, ways_xy=None, skip=frozenset(), min_size=None, own=None, house_land_layers=()):
+                   ml_roads_xy=None, ways_xy=None, skip=frozenset(), min_size=None, own=None, house_land_layers=(),
+                   lod2_models=None):
     """[(Spec, gmin, gmax)] of the buildings whose footprint centroid is in the tile [x0, x1) x [y0, y1) (own: the
     tile's box when it says which points are its own, roads.box_owns: a geotile's)
     (anchor frame), rings relative to (x0, y0). layers: mapgeom.Features of buildings (one per map cell; a
@@ -2659,7 +2770,10 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
     buildings) is a deck, a boat or a vehicle, left out (_ml_false). skip: ids of buildings left out (a gas station's
     canopy, drawn by the mod from the stock levels' props: gasstations.tile_sites). min_size (min height m, min
     footprint m²): only buildings at least that tall or that large (the skyline tiles: skyline_tile), tested before
-    any other work on a building."""
+    any other work on a building. lod2_models: GUGiK's models round the tile (pl_lod2.models, the anchor frame; None:
+    none asked): the tile's own (their outline's centre in it) are drawn as modelled, and the map's footprints mostly
+    inside models are left out, lending them their attributes (_Lod2)."""
+    lod2 = _Lod2(lod2_models, x0, y0) if lod2_models else None
     parts_of = _PartsOf(frame, part_layers)     # building id -> [(ring in the anchor frame, (own height, bottom))]
     seen = set()
     rings, attrs, looks, mins = [], [], [], []
@@ -2671,7 +2785,7 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
         rows = range(len(f.kind))
         if isinstance(f, mapgeom.Features):     # only the buildings whose centre may be in the tile (the exact test below)
             cx_, cy_ = f.outer_centres(frame)
-            m = CENTRE_PREFILTER_M
+            m = CENTRE_PREFILTER_M if lod2 is None else LOD2_MARGIN_M     # (a model's donors: _Lod2)
             rows = np.flatnonzero((cx_ >= x0 - m) & (cx_ < x1 + m) & (cy_ >= y0 - m) & (cy_ < y1 + m)).tolist()
         for i in rows:
             if a.get("is_underground") is not None and bool(a["is_underground"][i]):
@@ -2680,7 +2794,9 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
             if lv is not None and np.isfinite(lv) and lv < 0:
                 continue                # below ground (Shot Tower Metro, level -2, stood across a Baltimore street)
             key = ids[i] if ids is not None else None
-            if key is not None and (key in seen or key in skip):
+            if key is not None and key in seen:
+                continue
+            if key is not None and key in skip and lod2 is None:
                 continue
             parts = f.parts(i)
             if not parts or not parts[0]:
@@ -2691,6 +2807,17 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
             e, n = mapgeom.enu_xy(f, frame, outer)
             k = len(e) - 1             # the same reduction as np.mean, without its wrapper (36k calls a tile set)
             cx, cy = float(e[:-1].sum() / k), float(n[:-1].sum() / k)
+            if lod2 is not None:
+                lring = np.stack([e[:-1] - x0, n[:-1] - y0], 1)
+                if key is not None and key in skip:         # (a gas station's canopy: no model under the stock one)
+                    lod2.suppress(lring)
+                    continue
+                if a.get("src_record") is not None and landmarks.of(a["src_record"][i]) is not None:
+                    lod2.suppress(lring)                    # (a landmark's own model)
+                elif lod2.replaces(lring, {k_: (a[k_][i] if k_ in a else None) for k_ in LOD2_LENT}):
+                    if key is not None:
+                        seen.add(key)
+                    continue
             if not (x0 <= cx < x1 and y0 <= cy < y1) if own is None else not own.owns(cx, cy):
                 continue
             if min_size is not None:
@@ -2817,6 +2944,12 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
             attrs.append(at)
             looks.append(None)
             mins.append(mh)
+    if lod2 is not None:
+        for k_, mdl in lod2.own(x1 - x0, y1 - y0, None if own is None else (lambda x, y: own.owns(x + x0, y + y0))):
+            rings.append(mdl.ring)
+            attrs.append(lod2.attrs(k_))
+            looks.append(None)
+            mins.append(0.0)
     if not rings:
         return []
     # a quay structure alongside a moored ship: a low deck (its scanned height is the ship's flank). The ship may be
@@ -2894,6 +3027,8 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
                       _fr_part=look is not None or mh > .5, _fr_neighbours=int(sh),
                       _fr_residential=bool(house_res[k]) if house_res is not None else False)
         spec = plan(ring, at, int(sh) if look is None else 0, clat, clon, look, town, dense, west_town, alpine)
+        if at.get("lod2") is not None:
+            spec.lod2 = lod2.models[at["lod2"]]
         spec.min_h = mh
         spec.portal = bool(at.get("portal"))
         i0, i1 = (ends[k - 1] if k else 0), ends[k]
@@ -3822,6 +3957,29 @@ def custom_models(frame, custom, ground, out_dir, vfs_dir, road_ends=None):
     return _custom_tile_entries(frame, custom, ground, out_dir, vfs_dir, road_ends=road_ends)
 
 
+LOD2_MODEL_MARGIN_M = 100.0    # m round a road tile its LoD2 models are asked for (what its footprints may reach)
+
+
+def lod2_models(frame, x0, y0, x1, y1, md):
+    """GUGiK's models round the tile [x0, x1) x [y0, y1) (pl_lod2.models) when BNE_PL_LOD2 is on, else None. A sheet
+    that could not be had marks the build incomplete (revisit.fault: made again next visit) and the tile keeps the map's
+    footprints."""
+    import pl_lod2
+    if not pl_lod2.ON or md is None:
+        return None
+    try:
+        return pl_lod2.models(frame, x0, y0, x1, y1, md.cache_dir, md.fetcher, margin=LOD2_MODEL_MARGIN_M) or None
+    except pl_lod2.Unavailable as e:
+        import logging
+        import revisit
+        logging.getLogger("earthd.buildings").warning("LoD2 models unavailable, the map's footprints instead: %s", e)
+        revisit.fault()
+    except Exception:
+        import logging
+        logging.getLogger("earthd.buildings").warning("LoD2 models failed, the map's footprints instead", exc_info=True)
+    return None
+
+
 def road_tile_items(
     frame, tx, ty, md, ground, decks=None, skip=frozenset(), cache_dir=None
 ):
@@ -3887,6 +4045,7 @@ def road_tile_items(
         else None,
         skip=skip,
         house_land_layers=[c.layers.get("land_use") for c in cds],
+        lod2_models=lod2_models(frame, x0, y0, x1, y1, md),
     )
     custom = []
     if cache_dir is not None:
