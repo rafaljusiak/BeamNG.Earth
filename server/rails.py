@@ -36,6 +36,16 @@ MARGIN_M = 4.0                  # ribbons run this far past the tile box (the ro
 GATUSPAR_M = 3.5
 # (3.4 m wide: Göteborg's double tracks lie 3.24-4.19 m apart, half of them, so a pair's paving mostly meets; no official width)
 EMBEDDED = {"m": "road_asphalt_2lane", "tl": 11.0, "p": 19, "layer": "base", "w": 3.4}
+# The countries whose town trams get that: a tram beside a town street is street track on paving, and no raised
+# sidewalk or median island is built across a tram track (roads.build_tile). Poland (2026-11-13, Warsaw: its avenues'
+# trams run in the median or in the street; a divided road's median, a raised island up to 6 m wide, was laid over
+# their tracks). Its networks are standard gauge but for Lodz and a few more at 1 m: drawn at one gauge here.
+TRAM_STREETS = frozenset({"SE", "PL"})
+
+
+def tram_streets(country):
+    """Whether the country's (ISO 3166 alpha-2) town trams are street track on paving (TRAM_STREETS)."""
+    return str(country or "").upper() in TRAM_STREETS
 
 
 def _chunk(look, w, pts):
@@ -132,7 +142,7 @@ def _crossing_windows(xy, lines):
 
 def tram_lines(frame, tx, ty, cells):
     """[(centreline (k, 2), half the track's width)] of the trams on the ground near road tile (tx, ty): what a raised
-    sidewalk or median stops at (Sweden's: roads.build_tile)."""
+    sidewalk or median stops at (TRAM_STREETS' countries: roads.build_tile)."""
     import roads
     box = roads.tile_bbox(tx, ty)
     out, seen = [], set()
@@ -153,14 +163,15 @@ def tram_lines(frame, tx, ty, cells):
 
 def tile_chunks(frame, tx, ty, cells, country=None, urban_fn=None):
     """The track chunks of road tile (tx, ty) (anchor frame): ballast, sleepers, then the rails (material order: the
-    road mesh draws them in that order). cells: the roads Features of the cells touching the tile. Sweden (country),
-    in town (urban_fn, as road_specs): a tram beside a carriageway is street track on paving (GATUSPAR_M)."""
+    road mesh draws them in that order). cells: the roads Features of the cells touching the tile. Sweden and Poland
+    (country: TRAM_STREETS), in town (urban_fn, as road_specs): a tram beside a carriageway is street track on paving
+    (GATUSPAR_M)."""
     import railways
     import roads
     box = roads.tile_bbox(tx, ty)
     reach = max(t[0] for t in TRACK.values()) + MARGIN_M
     carriageways, town_ways, tracks, seen = {}, {}, [], set()
-    sweden = str(country or "").upper() == "SE"
+    sweden = tram_streets(country)              # (Sweden's rule, Poland's too)
     llb = _lonlat_box(frame, box, reach + 20.0)
     for feats in cells:
         if feats is None or len(feats) == 0 or "subtype" not in feats.attrs:

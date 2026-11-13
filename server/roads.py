@@ -9165,11 +9165,12 @@ def build_tile(frame, tx, ty, cells, elev, urban_fn=None, walks=None, bridges=No
     if walks is not None:
         import railways
         rail_cuts = railways.walk_cut_lines(frame, cells, own_box)
+    import rails
+    if rails.tram_streets(country):             # (Sweden, Poland)
+        trams = rails.tram_lines(frame, tx, ty, cells)
     if str(country or "").upper() == "SE":
         import furniture
         import markings as _gw
-        import rails
-        trams = rails.tram_lines(frame, tx, ty, cells)
         stops = []
         if nodes is not None and walks is not None:
             import secrossings as _cx

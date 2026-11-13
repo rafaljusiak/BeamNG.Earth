@@ -92,6 +92,16 @@ class SwedishTownTramTest(unittest.TestCase):
         self.assertIn(rails.BALLAST["m"], {c["m"] for c in self.track(8.0, urban=country)})
         self.assertIn(rails.BALLAST["m"], {c["m"] for c in self.track(8.0, country="DE")})
 
+    def test_poland_takes_the_same_rule(self):
+        # Warsaw's avenues (2026-11-13): trams in the street or its median, under a raised median island before
+        half = roads.road_specs(cells([[(-300, 128), (600, 128)]], ["residential"], ["road"])[0], self.TOWN)[0].width / 2
+        mats = {c["m"] for c in self.track(half + 1.5, country="PL")}
+        self.assertIn(rails.EMBEDDED["m"], mats)
+        self.assertNotIn(rails.SLEEPER["m"], mats)
+        self.assertIn(rails.BALLAST["m"], {c["m"] for c in self.track(14.0, country="pl")})      # (a reserved track)
+        self.assertTrue(rails.tram_streets("PL") and rails.tram_streets("se"))
+        self.assertFalse(rails.tram_streets("DE") or rails.tram_streets(None))
+
     def test_tram_lines_for_the_sidewalks(self):
         feats = cells([[(-300, 133), (600, 133)], [(-300, 128), (600, 128)]], ["tram", "residential"], ["rail", "road"])
         lines = rails.tram_lines(FRAME, 0, 0, feats)
