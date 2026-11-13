@@ -36,7 +36,8 @@ log = logging.getLogger("earthd.gradesep")
 MODE = os.environ.get("BNE_GRADESEP", "tunnels")
 ON = MODE == "on"
 TUNNELS = MODE in ("on", "tunnels")
-VERSION = 1             # in MapData.versions(): every cell's ranges (cell_facts) and tiles made again on a change
+VERSION = 2             # in MapData.versions(): every cell's ranges (cell_facts) and tiles made again on a change
+# (2: a railway's short tunnel range that is a piece of a longer tunnel is no underpass, railways.short_tunnel)
 DEM_ZOOM = 15
 SEP_M = 4.0             # m the upper line's ground stands above the lower one's (medians of four heights each)
 SIDE_M = 2.0            # m ... at least, on each side of each line
@@ -196,7 +197,7 @@ def _pieces(feats, i, kind):
         elif kind == 1:
             if L is None:
                 L = roads._feature_length_m(feats, i)
-            if (b - a) * L < railways.SHORT_TUNNEL_M:
+            if railways.short_tunnel(feats, i, a, b, L):
                 out.append((2, a, b, False))
         elif kind == 0:
             out.append((3, a, b, False))        # (any length: _underpasses measures the tunnel it is part of)

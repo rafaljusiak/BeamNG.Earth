@@ -190,6 +190,27 @@ class RailwayTest(unittest.TestCase):
         self.assertAlmostEqual([g[2] for g in got if g[0] == "id000"][0], 250.0, 0, "track through the short tunnel")
         self.assertLess(max(g[2] for g in got if g[0] == "id002"), 60.0, "a long tunnel left out")
 
+    def test_a_short_track_inside_a_long_tunnel_is_no_underpass(self):
+        """A crossover between a long tunnel's two tracks is a segment of its own, 50 m of tunnel from end to end: no
+        track on the ground over it and no bridge for the streets above (Warsaw's cross-city tunnel under Aleje
+        Jerozolimskie, 2026-11-13). One between the tracks of a short tunnel (under a road bridge) stays track."""
+        import gradesep
+        f = features([[(0.0, 100.0), (250.0, 100.0)], [(0.0, 104.0), (250.0, 104.0)],
+                      [(100.0, 100.0), (150.0, 104.0)],
+                      [(0.0, 150.0), (250.0, 150.0)], [(0.0, 154.0), (250.0, 154.0)],
+                      [(115.0, 150.0), (135.0, 154.0)]],
+                     ["standard_gauge"] * 6, subtypes=["rail"] * 6,
+                     flags=[(0, "is_tunnel", 0.1, 0.9), (1, "is_tunnel", 0.1, 0.9), (2, "is_tunnel"),
+                            (3, "is_tunnel", 0.44, 0.56), (4, "is_tunnel", 0.44, 0.56), (5, "is_tunnel")])
+        self.assertFalse(railways.short_tunnel(f, 2, 0.0, 1.0))
+        self.assertTrue(railways.short_tunnel(f, 5, 0.0, 1.0))
+        self.assertTrue(railways.short_tunnel(f, 3, 0.44, 0.56))
+        self.assertFalse(railways.short_tunnel(f, 0, 0.1, 0.9))
+        ground = [len(dict(railways._pieces(f, i))["ground"]) for i in range(6)]
+        self.assertEqual(ground, [2, 2, 0, 1, 1, 1], "the crossover in the long tunnel left out, the other track")
+        self.assertEqual([k for k, *_ in gradesep._pieces(f, 2, 1)], [])
+        self.assertEqual([k for k, *_ in gradesep._pieces(f, 5, 1)], [2])
+
     def test_level_crossing_rails_meet_the_road_on_gentle_ramps(self):
         """The rails' top is flush with the road where the track crosses it (they stood 0.6 m over it at its edge), and
         the track ramps back to its own height at 1.7 %."""

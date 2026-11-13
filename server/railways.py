@@ -520,6 +520,97 @@ WEAR_FLAGS = (("is_abandoned", 2), ("is_disused", 1))    # a line's wear: 1 out 
 UNBUILT_FLAGS = ("is_under_construction",)              # not drawn (no track yet), as OSM's proposed lines
 SHORT_TUNNEL_M = 60.0       # m: a "tunnel" this short is the line passing under a road bridge (OSM tags those
                             # tunnel too): track there (the track stopped either side of an overpass, 2026-10-25)
+TUNNEL_TOUCH_M = 1.0        # m: tunnel ranges of two tracks with an end this near the other's line are one tunnel
+
+
+def short_tunnel(feats, i, a, b, L=None):
+    """Whether the tunnel range a-b (fractions) of railway i is the line passing under a road bridge: shorter than
+    SHORT_TUNNEL_M (L: the feature's length m, measured if not given) and no piece of a longer tunnel. A track that
+    begins and ends inside a tunnel is a segment of its own, tunnel from end to end: the two crossovers of Warsaw's
+    cross-city tunnel under Aleje Jerozolimskie (ways 1448294045 and 1448294046, 59 and 56 m, 52.23075 N 21.01602 E)
+    were laid on the avenue as track, and the streets over them bridged (gradesep), 2026-11-13. So a short range that
+    touches a long one (TUNNEL_TOUCH_M; through other short ones too) is tunnel as it."""
+    if L is None:
+        L = roads._feature_length_m(feats, i)
+    if (b - a) * L >= SHORT_TUNNEL_M:
+        return False
+    return not _in_long_tunnel(feats, i, a, b)
+
+
+def _in_long_tunnel(feats, i, a, b):
+    """Whether tunnel range a-b of rail feature i touches (TUNNEL_TOUCH_M, an end of one on the other's line) a rail
+    tunnel range of SHORT_TUNNEL_M or more in feats, straight or through other short ones. The layer's tunnel
+    ranges (roads.tag_level_ranges of its rail features) are grouped once and kept on feats."""
+    got = feats.__dict__.get("_rw_tunnel_groups")
+    if got is None:
+        got = feats.__dict__["_rw_tunnel_groups"] = _tunnel_groups(feats)
+    best, hit = 0.0, False
+    for fa, fb, long_ in got.get(i, ()):
+        o = min(b, fb) - max(a, fa)
+        if o > best:
+            best, hit = o, long_
+    return hit
+
+
+def _near_line(p, xy, m):
+    """Whether point p is within m of polyline xy (k, 2)."""
+    a, d = xy[:-1], np.diff(xy, axis=0)
+    dd = (d * d).sum(axis=1)
+    t = np.clip(((p - a) * d).sum(axis=1) / np.where(dd > 0, dd, 1.0), 0.0, 1.0)
+    return bool((np.hypot(*(a + d * t[:, None] - p).T) <= m).any())
+
+
+def _tunnel_groups(feats):
+    """{feature row: [(from, to, long)]} of the layer's rail tunnel ranges: long where the range or one it touches
+    (_in_long_tunnel) is SHORT_TUNNEL_M or more. {} for a layer without a short one (nothing measured)."""
+    sub = feats.attrs.get("subtype")
+    if sub is None or not len(feats):
+        return {}
+    tags = roads._tag_ranges_list(feats)
+    rows = [i for i in np.flatnonzero(np.asarray(sub).astype(str) == "rail").tolist()
+            if any(k == "tunnel" for _a, _b, k in tags[i])]
+    pcs = []                        # (row, from, to, xy m, length m)
+    for i in rows:
+        for a, b, k in tags[i]:
+            if k != "tunnel" or b - a <= roads.MIN_PART:
+                continue
+            for part in feats.parts(i):
+                for ring in part:
+                    if len(ring) < 2:
+                        continue
+                    r = np.asarray(ring if (a, b) == (0.0, 1.0) else roads.sub_polyline(ring, a, b), np.float64)
+                    if len(r) >= 2:
+                        if not pcs:
+                            sc = np.array([111320.0 * math.cos(math.radians(float(r[0, 1]))), 111320.0])
+                        xy = r[:, :2] * sc
+                        pcs.append((i, a, b, xy, float(np.hypot(*np.diff(xy, axis=0).T).sum())))
+    if all(p[4] >= SHORT_TUNNEL_M for p in pcs):
+        return {}
+    box = [(p[3][:, 0].min() - TUNNEL_TOUCH_M, p[3][:, 1].min() - TUNNEL_TOUCH_M,
+            p[3][:, 0].max() + TUNNEL_TOUCH_M, p[3][:, 1].max() + TUNNEL_TOUCH_M) for p in pcs]
+    root = list(range(len(pcs)))
+
+    def find(j):
+        while root[j] != j:
+            root[j] = root[root[j]]
+            j = root[j]
+        return j
+
+    for j in range(len(pcs)):
+        for k in range(j + 1, len(pcs)):
+            bj, bk = box[j], box[k]
+            if pcs[j][0] == pcs[k][0] or bj[0] > bk[2] or bk[0] > bj[2] or bj[1] > bk[3] or bk[1] > bj[3] \
+                    or find(j) == find(k):
+                continue
+            xj, xk = pcs[j][3], pcs[k][3]
+            if any(_near_line(p, xk, TUNNEL_TOUCH_M) for p in (xj[0], xj[-1])) \
+                    or any(_near_line(p, xj, TUNNEL_TOUCH_M) for p in (xk[0], xk[-1])):
+                root[find(j)] = find(k)
+    long_ = {find(j) for j, p in enumerate(pcs) if p[4] >= SHORT_TUNNEL_M}
+    out = {}
+    for j, p in enumerate(pcs):
+        out.setdefault(p[0], []).append((p[1], p[2], find(j) in long_))
+    return out
 
 
 def wear(feats, i):
@@ -583,12 +674,12 @@ def osm_gauge(feats, i):
 
 def _pieces(feats, i):
     """[("ground" | "bridge", [lon/lat polylines])] of feature i: its level ranges with the short tunnels
-    (SHORT_TUNNEL_M) on the ground and the long ones left out."""
+    (short_tunnel) on the ground and the long ones left out."""
     rngs = roads.level_ranges(feats, i)
     if not rngs:
         return [("ground", roads.ground_parts(feats, i))]
     L = roads._feature_length_m(feats, i)
-    off = [(a, b, k) for a, b, k in rngs if not (k == "tunnel" and (b - a) * L < SHORT_TUNNEL_M)]
+    off = [(a, b, k) for a, b, k in rngs if not (k == "tunnel" and short_tunnel(feats, i, a, b, L))]
     ground, at = [], 0.0
     for a, b, _k in off:
         if a - at > roads.MIN_PART:

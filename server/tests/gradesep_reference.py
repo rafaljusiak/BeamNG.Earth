@@ -20,7 +20,7 @@ def pieces(feats, i, kind):
             out.append((kind, at, a, False))
         if k == "bridge":
             out.append((None, a, b, True))
-        elif kind == 1 and (b - a) * L < G.railways.SHORT_TUNNEL_M:
+        elif kind == 1 and G.railways.short_tunnel(feats, i, a, b, L):
             out.append((2, a, b, False))
         elif kind == 0:
             out.append((3, a, b, False))
