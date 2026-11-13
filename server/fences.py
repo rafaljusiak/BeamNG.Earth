@@ -27,6 +27,12 @@ WALL_LEN, WALL_ALONG, WALL_ACROSS, WALL_H = 4.0, 2.0, 1.25, 2.4
 CHAIN_TYPES = {"chain_link", "chainlink", "chain-link", "chain"}
 NOISE_TYPES = {"noise_barrier", "noisebarrier", "sound_barrier"}
 BBOX_PAD_M = 8.0
+# Countries where a mapped fence of any kind is drawn (as the chain-link panel, the one metal fence model), not only
+# those tagged chain-link. Poland (2026-11-13): house plots, schools, allotments and works are fenced nearly everywhere,
+# in wire mesh or welded panels mostly, and its mappers seldom tag the kind (a Warsaw cell: 66 fences, 62 without
+# fence_type). Not hedges (their own barrier value) nor plain walls: the only wall model is the 2.4 m noise barrier.
+ANY_FENCE = frozenset({"PL"})
+NOT_PANELS = {"hedge", "living", "wood", "wooden", "split_rail", "pole", "roundpole", "stone", "bars", "railing"}
 
 
 def _tags(feats, i):
@@ -43,8 +49,9 @@ def _tags(feats, i):
     return {str(k).strip().lower(): str(v).strip().lower() for k, v in values.items()}
 
 
-def kind_of(feats, i):
-    """'chainlink' or 'noisewall' when the mapped line is one, else None."""
+def kind_of(feats, i, country=None):
+    """'chainlink' or 'noisewall' when the mapped line is one, else None. country (ISO 3166 alpha-2): in ANY_FENCE's
+    countries a fence of an untagged or metal kind is a chain-link one too."""
     classes = feats.attrs.get("class")
     cls = str(classes[i]).strip().lower() if classes is not None else ""
     tags = _tags(feats, i)
@@ -54,6 +61,8 @@ def kind_of(feats, i):
     if cls in CHAIN_TYPES or barrier in CHAIN_TYPES or fence_type in CHAIN_TYPES:
         return G_CHAIN
     if cls in ("fence",) or barrier == "fence":
+        if str(country or "").upper() in ANY_FENCE and fence_type not in NOT_PANELS:
+            return G_CHAIN
         return G_CHAIN if fence_type in CHAIN_TYPES else None
     if cls in NOISE_TYPES or barrier in NOISE_TYPES or wall in NOISE_TYPES:
         return G_WALL
@@ -97,13 +106,13 @@ def _place(group, centre, tangent):
             _yaw(ty, -tx))
 
 
-def rows(frame, infra_fn, box, elev, decks=()):
+def rows(frame, infra_fn, box, elev, decks=(), country=None):
     """Forest rows [group, x, y, z, yaw, scale, height, rank] of the chain-link fences and noise walls whose
     centre is inside box (x0, y0, x1, y1). decks ([{"n": (k, 3) XYZ, "w": road width}], as guardrails.forest_rows
     takes them): a wall or fence on a bridge stands on its deck, not on the ground under it (GitHub #775: a noise
     wall tagged layer=1 on the B 29's bridge stood on the road under it and blocked it). Which panels are on a deck
     is decided as for the mapped guardrails (guardrails._deck_level_hint / _surface_info): the way's own bridge /
-    layer tags, else only where the ground already agrees with the deck."""
+    layer tags, else only where the ground already agrees with the deck. country: kind_of's."""
     if infra_fn is None:
         return []
     x0, y0, x1, y1 = map(float, box)
@@ -127,7 +136,7 @@ def rows(frame, infra_fn, box, elev, decks=()):
             fid = str(feats.ids[i])
             if fid in seen or int(feats.kind[i]) not in (mapgeom.LINE, mapgeom.POLYGON):
                 continue
-            group = kind_of(feats, i)
+            group = kind_of(feats, i, country)
             if group is None:
                 continue
             b = boxes[i]

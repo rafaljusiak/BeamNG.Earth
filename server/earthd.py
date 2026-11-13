@@ -2512,7 +2512,7 @@ class Server:
             # (no street tree in a house: its own or the next tile's)
             rings = buildingsmod.near_rings(anchor.frame, tx, ty, self.mapdata, skip=skip)
             props[:] = furnituremod.off_buildings(props, rings)
-            props.extend(buildingsmod.doors(items, lines, x0, y0, drives))
+            props.extend(buildingsmod.doors(items, lines, x0, y0, drives, self.country(anchor)))
             props.extend(buildingsmod.toll_booth_rows(items, x0, y0))
             drives.extend(buildingsmod.garage_drives(items, lines, x0, y0))
             chunks += drives
@@ -2623,8 +2623,11 @@ class Server:
                                   clearance=clearance[0] if clearance else None)    # high-voltage lines
             import fences
             try:
-                props.extend(fences.rows(anchor.frame, infra_fn, box, elev, decks=[
-                    {"n": np.column_stack((xy, z)), "w": spec.width} for _f, spec, xy, z, _l in deck_parts] + rail_decks))
+                mapped_fences = fences.rows(anchor.frame, infra_fn, box, elev, decks=[
+                    {"n": np.column_stack((xy, z)), "w": spec.width} for _f, spec, xy, z, _l in deck_parts] + rail_decks,
+                    country=self.country(anchor))
+                props[:] = buildingsmod.plot_fences_off(props, mapped_fences)   # (Poland's plots: the map's own fence)
+                props.extend(mapped_fences)
             except Exception as ex:
                 log.warning("fences: tile %s_%s: %s: %s", tx, ty, type(ex).__name__, ex)
             import picnic

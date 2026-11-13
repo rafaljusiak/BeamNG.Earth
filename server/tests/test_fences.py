@@ -32,6 +32,18 @@ class KindTest(unittest.TestCase):
         self.assertIsNone(fences.kind_of(self.features("wall", {"tags": "null"}), 0))
 
 
+    def test_poland_draws_its_plain_fences(self):
+        # Warsaw (2026-11-13): 62 of a cell's 66 mapped fences carry no fence_type, and nearly every plot is fenced
+        self.assertEqual(fences.kind_of(self.features("fence"), 0, "PL"), "chainlink")
+        self.assertEqual(fences.kind_of(self.features("fence", {"barrier": "fence", "fence_type": "metal"}), 0, "pl"),
+                         "chainlink")
+        self.assertIsNone(fences.kind_of(self.features("fence", {"fence_type": "wood"}), 0, "PL"))
+        self.assertIsNone(fences.kind_of(self.features("hedge"), 0, "PL"))
+        self.assertIsNone(fences.kind_of(self.features("wall", {"wall": "brick"}), 0, "PL"), "no wall model")
+        self.assertIsNone(fences.kind_of(self.features("fence"), 0, "DE"))
+        self.assertIsNone(fences.kind_of(self.features("fence"), 0, None))
+
+
 class PlaceTest(unittest.TestCase):
     def setUp(self):
         self.frame = geodesy.EnuFrame(39.2834, -76.5934, 0.0)

@@ -3100,12 +3100,14 @@ DRIVEWAY_W = 3.2            # m
 DRIVEWAY = {"m": "road_asphalt_2lane", "tl": 11.0, "p": 19}     # a road tile chunk's look (roads.LOOK)
 
 
-def doors(items, lines, x0, y0, drives=None):
+def doors(items, lines, x0, y0, drives=None, country=None):
     """Prop rows (trees.lua rows, group "door") of a front door per house: on the wall whose middle is
     nearest a road and faces it, a row house's to one side, others' in the middle. lines: [(centreline
     (k, 2) in the anchor frame, half width[, class, urban])]. A building close to an urban main street gets
     a shopfront ground floor instead (spec.shop, most of them). drives (a list) gets a driveway chunk (road
-    tile chunk dicts, draped by roadmesh) from each detached house's front to the road's edge."""
+    tile chunk dicts, draped by roadmesh) from each detached house's front to the road's edge. country (ISO 3166
+    alpha-2): where houses stand in fenced plots (PLOT_FENCES: Poland), a fence round the plot's front and sides
+    (_plot_fence) instead of the low front fence a share of the houses get."""
     if not lines:
         return []
     segs, smain, shalf, sminor = [], [], [], []
@@ -3127,6 +3129,10 @@ def doors(items, lines, x0, y0, drives=None):
     L2 = np.maximum((D * D).sum(1), 1e-12)
     rows = []
     others = [(spec, spec.ring + np.array([x0, y0])) for spec, _, _ in items if (spec.min_h or 0.0) <= 0.5]
+    plot_share = PLOT_FENCES.get(str(country or "").upper())
+    plot_taken = set()                          # (the plot fences' panels so far: neighbours share one fence)
+    plot_boxes = (np.array([np.r_[r.min(0), r.max(0)] for _s, r in others], np.float64).reshape(-1, 4)
+                  if plot_share is not None else None)
     for spec, gmin, gmax in items:
         no_door = False
         if spec.plain or spec.floors >= 7 or spec.band in (BAND_OFFICE, BAND_OFFICE2) or spec.wall:
@@ -3208,7 +3214,12 @@ def doors(items, lines, x0, y0, drives=None):
                 pts = [p0 + (p1 - p0) * (j / (n - 1)) for j in range(n)]
                 drives.append({"m": DRIVEWAY["m"], "w": DRIVEWAY_W, "tl": DRIVEWAY["tl"], "p": DRIVEWAY["p"],
                                "n": [[round(float(pp[0]), 3), round(float(pp[1]), 3), 0.0] for pp in pts]})
-        if spec.roof != "flat" and not narrow and _hash01(spec.seed, "fence") < FENCE_SHARE:
+        if plot_share is not None:
+            if spec.roof != "flat" and not narrow and _hash01(spec.seed, "fence") < plot_share:
+                rows.extend(_plot_fence(spec, ring, a, d, Le, f, A[kseg], D[kseg], L2[kseg], SHALF[kseg], gmin,
+                                        drives is not None and spec.wall and Le >= 7.0, (A, B, SHALF), others,
+                                        plot_boxes, plot_taken))
+        elif spec.roof != "flat" and not narrow and _hash01(spec.seed, "fence") < FENCE_SHARE:
             rows.extend(_front_fence(spec, a, d, Le, f, A[kseg], D[kseg], L2[kseg], SHALF[kseg], gmin,
                                      drives is not None and spec.wall and Le >= 7.0, (A, B, SHALF)))
         p = a + d * (Le * f) + out * DOOR_OUT_M
@@ -3316,6 +3327,134 @@ def _front_fence(spec, a, d, Le, f, A, D, L2, half, z, driveway, roads=None):
                 continue
         rows.append([G_FENCE, round(float(p[0]), 2), round(float(p[1]), 2), round(float(z), 2), yaw, 1.0, 1.3,
                      round(_hash01(spec.seed, "fr", k), 3)])
+    return rows
+
+
+# Fenced plots (the user, 2026-11-13: "in Poland nearly every house plot is fenced (metal panel, brick-and-metal, or
+# concrete)"; the low wooden front fence on 30 % of the houses made its suburbs North American). There a detached
+# house gets a fence along the front of its plot and down both sides, with gaps at the path to the door and at the
+# driveway. The map has no plots: the front is the back of the sidewalk, as _front_fence's; a side is halfway to the
+# next building along the street (PLOT_SIDE_MAX_M at most past the house), so neighbours meet at one fence, the second
+# one's panels left out (PLOT_SHARED_M); the sides run PLOT_BACK_M past the house's back wall. No fence along the
+# back: seldom seen from a road, a third more panels. The panel is West Coast USA's chain-link one (fences.py's, the
+# only metal fence among the stock models the mod names): Poland's wire-mesh and panel fences, not its brick or
+# concrete ones, for which the game has no model we know of.
+G_PLOT_FENCE = "yardfence"      # trees.lua: s_chainlink_old, shown only near (GROUP_MAX_M)
+PLOT_FENCES = {"PL": 0.85}      # country -> the share of its detached houses with a fenced plot (hashed)
+PLOT_SIDE_MAX_M = 6.0           # m a plot reaches past the house's side walls at most ...
+PLOT_SIDE_MIN_M = 1.0           # ... and at least (the next building nearer than twice this: no fence between them)
+PLOT_BACK_M = 3.0               # m the side fences run on past the house's back wall
+PLOT_SHARED_M = 2.0             # m: a panel this near one of another plot's is the same fence
+PLOT_BUILDING_M = 0.6           # m a panel's ends and middle keep from every other building
+
+
+PLOT_MAPPED_M = 8.0             # m: a plot fence's panel this near a mapped fence's is left out (the map's own)
+
+
+def plot_fences_off(props, mapped, m=PLOT_MAPPED_M):
+    """props (rows) without the plot fences' panels (G_PLOT_FENCE) within m of a mapped fence's or wall's panel
+    (mapped: fences.rows' rows): where the map has the plot's fence, that one stands. Pure."""
+    if not mapped or not any(r[0] == G_PLOT_FENCE for r in props):
+        return props
+    grid = {}
+    for r in mapped:
+        grid.setdefault((int(math.floor(r[1] / m)), int(math.floor(r[2] / m))), []).append((r[1], r[2]))
+
+    def near(r):
+        cx, cy = int(math.floor(r[1] / m)), int(math.floor(r[2] / m))
+        return any(math.hypot(r[1] - x, r[2] - y) <= m
+                   for i in (-1, 0, 1) for j in (-1, 0, 1) for x, y in grid.get((cx + i, cy + j), ()))
+    return [r for r in props if r[0] != G_PLOT_FENCE or not near(r)]
+
+
+def _near_ring(p, ring, m):
+    """Whether point p (2,) is inside the closed ring (k, 2) or within m of its outline. Pure."""
+    a, b = ring, np.roll(ring, -1, axis=0)
+    e = b - a
+    t = np.clip(((p - a) * e).sum(1) / np.maximum((e * e).sum(1), 1e-12), 0.0, 1.0)
+    if float(np.hypot(*(a + t[:, None] * e - p).T).min()) <= m:
+        return True
+    cross = ((a[:, 1] > p[1]) != (b[:, 1] > p[1])) & (
+        p[0] < a[:, 0] + (p[1] - a[:, 1]) * e[:, 0] / np.where(e[:, 1] == 0.0, 1e-12, e[:, 1]))
+    return bool(cross.sum() % 2)
+
+
+def _plot_fence(spec, ring, a, d, Le, f, A, D, L2, half, z, driveway, roads=None, others=(), boxes=None, taken=None):
+    """Prop rows of the fence round a house's plot (PLOT_FENCES): along its front as _front_fence's, with the gaps
+    for the path and the driveway, and down both sides to PLOT_BACK_M behind the house. ring: the house's outline
+    (k, 2); others [(spec, ring)] with their boxes (n, 4) x0 y0 x1 y1: the buildings no panel stands in or against,
+    and the neighbours a side fence is put halfway to; taken: the grid cells of the panels placed so far (a set,
+    added to): a panel beside another plot's is left out. roads: as _front_fence's."""
+    import fences
+    mid = a + d * (Le / 2)
+    t = float(np.clip(((mid - A) * D).sum() / L2, 0, 1))
+    q = A + t * D
+    v = mid - q
+    dist = float(np.hypot(*v))
+    if dist - (half + FENCE_BACK_M) < FENCE_MIN_YARD_M:
+        return []
+    nv = v / dist
+    dr = D / math.sqrt(L2)
+    centre = q + nv * (half + FENCE_BACK_M)
+    ring = np.asarray(ring, np.float64)
+    u, w = (ring - centre) @ dr, (ring - centre) @ nv
+    u0, u1, back = float(u.min()), float(u.max()), float(w.max()) + PLOT_BACK_M
+    lo, hi = u0 - PLOT_SIDE_MAX_M, u1 + PLOT_SIDE_MAX_M
+    near = []
+    if boxes is not None and len(boxes):
+        r = max(hi - lo, back) + 2 * PLOT_SIDE_MAX_M + 5.0
+        c = centre + nv * (back / 2)
+        pick = np.flatnonzero((boxes[:, 2] > c[0] - r) & (boxes[:, 0] < c[0] + r) & (boxes[:, 3] > c[1] - r)
+                              & (boxes[:, 1] < c[1] + r))
+        near = [others[k][1] for k in pick if others[k][0] is not spec]
+    for other in near:                          # a side: halfway to the next building beside the house
+        ou, ow = (other - centre) @ dr, (other - centre) @ nv
+        if ow.max() < 0.0 or ow.min() > back:
+            continue
+        if ou.min() >= u1:
+            hi = min(hi, (u1 + float(ou.min())) / 2)
+        elif ou.max() <= u0:
+            lo = max(lo, (u0 + float(ou.max())) / 2)
+    seg = fences.CHAIN_LEN
+    gaps = [float((a + d * (Le * f) - centre) @ dr)]                          # the path to the door
+    if driveway:
+        gaps.append(float((a + d * (Le * (0.82 if f <= 0.5 else 0.18)) - centre) @ dr))
+    runs = []                                   # (start, unit direction, length, the gaps along it)
+    if hi - lo >= 2 * seg:
+        runs.append((centre + dr * lo, dr, hi - lo, [g - lo for g in gaps]))
+    for side, gap in ((lo, u0 - lo), (hi, hi - u1)):
+        if gap >= PLOT_SIDE_MIN_M:
+            runs.append((centre + dr * side, nv, back, []))
+    rows = []
+    cell = lambda p: (int(math.floor(p[0] / PLOT_SHARED_M)), int(math.floor(p[1] / PLOT_SHARED_M)))    # noqa: E731
+    mine = set()
+    for start, along, length, holes in runs:
+        n = int(length // seg)
+        pad = (length - n * seg) / 2
+        for k in range(n):
+            s = pad + (k + 0.5) * seg
+            if any(abs(s - g) < seg / 2 + 0.9 for g in holes):
+                continue
+            p = start + along * s
+            ends = np.array([p - along * (seg / 2), p, p + along * (seg / 2)])
+            if roads is not None and len(roads[0]):
+                fast.require(0, "points_near_segments")
+                if np.asarray(fast._ef.points_near_segments(ends, np.ascontiguousarray(roads[0], np.float64),
+                                                            np.ascontiguousarray(roads[1], np.float64),
+                                                            np.asarray(roads[2], np.float64) + FENCE_CLEAR_M)).any():
+                    continue
+            if any(_near_ring(e, other, PLOT_BUILDING_M) for other in near for e in ends):
+                continue
+            if taken is not None:
+                cx, cy = cell(p)
+                if any((cx + i, cy + j) in taken for i in (-1, 0, 1) for j in (-1, 0, 1)):
+                    continue
+                mine.add((cx, cy))
+            px, py, yaw = fences._place(fences.G_CHAIN, p, along)
+            rows.append([G_PLOT_FENCE, round(px, 2), round(py, 2), round(float(z) + fences.CHAIN_LIFT, 2),
+                         round(yaw, 1) % 360.0, 1.0, fences.CHAIN_H, 0.0])
+    if taken is not None:
+        taken |= mine                           # (after its own: a plot's corner panels stand beside each other)
     return rows
 
 

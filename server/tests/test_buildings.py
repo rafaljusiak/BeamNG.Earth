@@ -534,6 +534,78 @@ class DoorTest(unittest.TestCase):
         for row in cut:
             self.assertGreater(row[1] - bld.FENCE_SEG_M / 2, -4.0 + 4.0 + bld.FENCE_CLEAR_M - 1e-9)
 
+    def plot(self, others=(), taken=None, roads=None):
+        """A 12 x 10 m house, its front 20 m from a road along y = 0 (half width 4 m), door in the middle."""
+        ring = np.array([[0.0, 20.0], [12.0, 20.0], [12.0, 30.0], [0.0, 30.0]])
+        spec = type("S", (), {"seed": 0.3})()
+        others = [(spec, ring)] + [(type("S", (), {"seed": 0.5})(), np.asarray(o, np.float64)) for o in others]
+        boxes = np.array([np.r_[r.min(0), r.max(0)] for _s, r in others])
+        return bld._plot_fence(spec, ring, ring[0], np.array([1.0, 0.0]), 12.0, 0.5, np.array([-100.0, 0.0]),
+                               np.array([300.0, 0.0]), 300.0 ** 2, 4.0, 1.5, False, roads, others, boxes, taken)
+
+    def test_a_polish_plot_is_fenced_along_its_front_and_sides(self):
+        import fences
+        rows = self.plot()
+        front = [r for r in rows if r[4] in (0.0, 180.0)]
+        sides = [r for r in rows if r not in front]
+        self.assertTrue(front and sides)
+        self.assertTrue(all(r[0] == bld.G_PLOT_FENCE and r[6] == fences.CHAIN_H for r in rows))
+        y_front = 4.0 + bld.FENCE_BACK_M
+        self.assertTrue(all(abs(r[2] - y_front) < 0.05 for r in front))
+        # (rows are a panel's origin, CHAIN_OX ahead of its centre along the fence)
+        cx = sorted(r[1] - fences.CHAIN_OX for r in front)
+        self.assertLess(cx[0], 0.0 - bld.PLOT_SIDE_MAX_M + fences.CHAIN_LEN)
+        self.assertGreater(cx[-1], 12.0 + bld.PLOT_SIDE_MAX_M - fences.CHAIN_LEN)
+        self.assertTrue(all(abs(x - 6.0) > fences.CHAIN_LEN / 2 for x in cx), "a gate's gap at the path to the door")
+        xs = sorted({round(r[1], 1) for r in sides})
+        self.assertEqual(len(xs), 2, "one fence down each side")
+        self.assertAlmostEqual(xs[0], -bld.PLOT_SIDE_MAX_M, delta=0.05)
+        self.assertAlmostEqual(xs[1], 12.0 + bld.PLOT_SIDE_MAX_M, delta=0.05)
+        self.assertGreater(max(r[2] for r in sides), 30.0, "past the back wall")
+        self.assertLess(max(r[2] for r in sides), 30.0 + bld.PLOT_BACK_M + fences.CHAIN_LEN)
+
+    def test_plot_fences_meet_halfway_to_a_neighbour_and_are_not_doubled(self):
+        neighbour = [[20.0, 20.0], [32.0, 20.0], [32.0, 30.0], [20.0, 30.0]]       # 8 m to the east
+        taken = set()
+        rows = self.plot([neighbour], taken)
+        sides = sorted({round(r[1], 1) for r in rows if r[4] not in (0.0, 180.0)})
+        self.assertAlmostEqual(sides[-1], 16.0, delta=0.05)         # halfway, not 6 m past the wall (in the neighbour)
+        self.assertTrue(taken)
+        again = self.plot([neighbour], taken)                       # the same ground fenced by the next plot
+        self.assertEqual(again, [], "every panel beside one that stands")
+        tight = self.plot([[[13.0, 20.0], [25.0, 20.0], [25.0, 30.0], [13.0, 30.0]]])  # 1 m apart: no fence between
+        self.assertEqual(len({round(r[1], 1) for r in tight if r[4] not in (0.0, 180.0)}), 1)
+
+    def test_plot_fences_keep_off_roads_and_buildings_and_mapped_fences(self):
+        side_street = (np.array([[-100.0, 0.0], [-9.0, -50.0]]), np.array([[300.0, 0.0], [-9.0, 80.0]]), np.array([4.0, 4.0]))
+        rows = self.plot(roads=side_street)
+        self.assertTrue(rows)
+        self.assertTrue(all(r[1] > -9.0 + 4.0 + bld.FENCE_CLEAR_M - 2.1 for r in rows))
+        shed = [[-5.0, 22.0], [-3.0, 22.0], [-3.0, 40.0], [-5.0, 40.0]]            # behind the house's west side
+        for r in self.plot([shed]):
+            self.assertFalse(-5.6 < r[1] - 1.0 < -2.4 and 21.4 < r[2] < 40.6 and r[4] in (0.0, 180.0))
+        rows = self.plot()
+        mapped = [["chainlink", r[1], r[2], 0.0, 0.0, 1.0, 1.76, 0.0] for r in rows[:3]]
+        door = ["door", rows[0][1], rows[0][2], 0.0, 0.0, 1.0, 2.2, 0.0]
+        left = bld.plot_fences_off(rows + [door], mapped)
+        self.assertIn(door, left)
+        self.assertLess(len(left), len(rows) + 1 - 2)
+        self.assertEqual(bld.plot_fences_off(rows, []), rows)
+
+    def test_only_poland_gets_plot_fences(self):
+        road_ = [(np.array([(-500.0, -10.0), (9000.0, -10.0)]), 4.0, "residential", True)]
+        seen = {"PL": 0, None: 0}
+        for country in seen:
+            for k in range(60):
+                spec = bld.plan(rect(k * 60, 6, 12, 10), {"class": "detached"}, 0, 52.2, 21.0)
+                rows = bld.doors([(spec, 0.0, 0.0)], road_, 0.0, 0.0, country=country)
+                groups = {r[0] for r in rows}
+                self.assertFalse(country is None and bld.G_PLOT_FENCE in groups)
+                self.assertFalse(country == "PL" and bld.G_FENCE in groups)
+                seen[country] += bld.G_PLOT_FENCE in groups
+        self.assertEqual(bld.PLOT_FENCES["PL"], 0.85)
+        self.assertGreater(seen["PL"], 20, "most pitched-roof houses")
+
     def test_company_sign_on_a_warehouse_front(self):
         seen = 0
         for k in range(30):

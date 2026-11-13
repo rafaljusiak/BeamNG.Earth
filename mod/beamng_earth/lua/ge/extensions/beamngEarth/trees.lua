@@ -276,6 +276,10 @@ end
 M.CATALOG.chainlink = { { '/art/shapes/objects/s_chainlink_old', 1.76 } }
 M.CATALOG.noisewall = { { WCA .. 'objects/s_concrete_noiseblocker', 2.4 } }
 M.GROUP_MAX_M.chainlink = 800
+-- The fences round house plots where houses stand in fenced plots (server buildings._plot_fence: Poland): the same
+-- chain-link panel, some 20 a house, so shown only near, as the yard fences (fence = 150).
+M.CATALOG.yardfence = { { '/art/shapes/objects/s_chainlink_old', 1.76 } }
+M.GROUP_MAX_M.yardfence = 200
 M.GROUP_MAX_M.noisewall = 2000
 -- Picnic tables and grills in parks (server picnic.py): Utah's table (2 x 1.4 m, 0.85 m high) and East
 -- Coast's grill. The table's materials live with Utah's buildings.

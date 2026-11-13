@@ -939,7 +939,7 @@ def _tile_parts(mark, frame, tile, zoom, g, buildings, left_hand, mph, gas_stati
     x0, y0, _, _ = box
     if items is not None:               # front doors and shopfronts, driveways into the road mesh
         props[:] = furniture.off_buildings(props, buildingsmod.near_rings(frame, tx, ty, _s.md, skip=skip))     # (no street tree in a house)
-        props.extend(buildingsmod.doors(items, lines, x0, y0, drives))
+        props.extend(buildingsmod.doors(items, lines, x0, y0, drives, country))
         props.extend(buildingsmod.toll_booth_rows(items, x0, y0))
         drives.extend(buildingsmod.garage_drives(items, lines, x0, y0))
         chunks += drives
@@ -1064,8 +1064,11 @@ def _tile_parts(mark, frame, tile, zoom, g, buildings, left_hand, mph, gas_stati
         mappedpoles.tile_poles(frame, tx, ty, _s.md, elev, props, wires, pole_profile, urban)
         import fences
         try:
-            props.extend(fences.rows(frame, infra_fn, box, elev, decks=[{"n": np.column_stack((xy, z)), "w": spec.width}
-                                                                        for _f, spec, xy, z, _l in deck_parts] + rail_decks))
+            mapped_fences = fences.rows(frame, infra_fn, box, elev, decks=[{"n": np.column_stack((xy, z)), "w": spec.width}
+                                                                           for _f, spec, xy, z, _l in deck_parts] + rail_decks,
+                                        country=country)
+            props[:] = buildingsmod.plot_fences_off(props, mapped_fences)   # (Poland's plots: the map's own fence stands)
+            props.extend(mapped_fences)
         except Exception as ex:
             log.warning("fences: tile %s_%s: %s: %s", tx, ty, type(ex).__name__, ex)
         import picnic
