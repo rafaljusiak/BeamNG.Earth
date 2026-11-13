@@ -5124,7 +5124,12 @@ def join_walk_ends(runs, carriageways):
     long tangent, so each street's sidewalk stopped at the other's carriageway with bare ground between). runs: the
     runs near the tile before clipping ({pts, side, w, fid, j, open, ramp_fids}); two are merged when the straight
     gap between their ends stays off every carriageway and they are on the same side (one continuous polyline: the
-    mesh mitres it, no seam). Pairs found greedily, nearest first. Returns the new list of runs."""
+    mesh mitres it, no seam). Pairs found greedily, nearest first. Returns the new list of runs.
+    A divided road's median band (a run with "median": MEDIAN_CURB_W of bare curb along the carriageway's edge) joins
+    another median band only, and the joined run is still one: joined with a sidewalk's end it took the sidewalk's
+    width and lost "median", a 2.5 m sidewalk slab along the median's line, half of it in the carriageway's lane
+    (Warsaw, Okularowa at 52.24147 N 21.13597 E: its carriageway's band with the sidewalk of the short carriageway
+    before it, in the one tile whose near box held both ends)."""
     ends = []                                   # (run index, at_end, point, leaving direction)
     for k, rn in enumerate(runs):
         p = rn["pts"]
@@ -5172,6 +5177,8 @@ def join_walk_ends(runs, carriageways):
         sj = rj["side"] if not ej else -rj["side"]
         if si != sj:
             continue                            # opposite sides of the streets: not one sidewalk
+        if bool(ri.get("median")) != bool(rj.get("median")):
+            continue                            # a median's curbed band and a sidewalk: not one slab (below)
         gap_pts = np.linspace(pi_[-1], pj_[0], max(2, int(L / 2.0) + 2))[1:-1]
         hw = 0.25 * (ri["w"] + rj["w"])
         if any(_seg_dist_min(cl, q[:2]) < h + hw * 0.5 for cl, h in carriageways for q in gap_pts):
@@ -5183,7 +5190,7 @@ def join_walk_ends(runs, carriageways):
         o0 = ri["open"][0] if ei else ri["open"][1]
         o1 = rj["open"][1] if not ej else rj["open"][0]
         runs[ki] = {"pts": densify(simplify(pts)), "side": si, "w": ri["w"], "fid": ri["fid"], "j": (j0, j1),
-                    "open": (o0, o1), "ramp_keys": sorted(set(ri.get("ramp_keys", [(ri["fid"], ri["side"])])
+                    "median": bool(ri.get("median")), "open": (o0, o1), "ramp_keys": sorted(set(ri.get("ramp_keys", [(ri["fid"], ri["side"])])
                                                                + rj.get("ramp_keys", [(rj["fid"], rj["side"])])))}
         runs[kj] = None
         alias[kj] = ki

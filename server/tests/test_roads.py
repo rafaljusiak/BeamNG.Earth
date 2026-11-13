@@ -1517,6 +1517,37 @@ class MedianTest(unittest.TestCase):
         self.assertEqual(int(out[64, 64]), sf.ASPHALT)
 
 
+class JoinWalkEndsTest(unittest.TestCase):
+    """roads.join_walk_ends: a median's curbed band and a sidewalk are not one slab (Warsaw, Okularowa at 52.24147 N
+    21.13597 E: a carriageway's 0.6 m median band joined the sidewalk end of the carriageway before it and came out
+    a 2.5 m sidewalk slab in its own left lane)."""
+    @staticmethod
+    def run_(x0, x1, w, median, fid):
+        pts = np.c_[np.linspace(x0, x1, 5), np.zeros(5), np.zeros(5)]
+        return {"pts": pts, "side": 1, "w": w, "fid": fid, "j": (False, False), "median": median, "open": (True, True)}
+
+    def test_a_median_band_does_not_join_a_sidewalk(self):
+        walk, band = self.run_(-20.0, -4.0, 2.5, False, "a"), self.run_(0.0, 40.0, roads.MEDIAN_CURB_W, True, "b")
+        out = roads.join_walk_ends([walk, band], [])
+        self.assertEqual(sorted((r["fid"], r["w"], r["median"]) for r in out),
+                         [("a", 2.5, False), ("b", roads.MEDIAN_CURB_W, True)])
+        self.assertEqual(len(roads.join_walk_ends([band, walk], [])), 2)
+
+    def test_joined_median_bands_are_still_a_median(self):
+        a, b = (self.run_(-20.0, -4.0, roads.MEDIAN_CURB_W, True, "a"), self.run_(0.0, 40.0, roads.MEDIAN_CURB_W, True, "b"))
+        out = roads.join_walk_ends([a, b], [])
+        self.assertEqual(len(out), 1)
+        self.assertTrue(out[0]["median"])
+        self.assertEqual(out[0]["w"], roads.MEDIAN_CURB_W)
+
+    def test_sidewalk_ends_still_join(self):
+        out = roads.join_walk_ends([self.run_(-20.0, -4.0, 2.5, False, "a"), self.run_(0.0, 40.0, 2.5, False, "b")], [])
+        self.assertEqual(len(out), 1)
+        self.assertFalse(out[0]["median"])
+        self.assertAlmostEqual(float(out[0]["pts"][:, 0].min()), -20.0)
+        self.assertAlmostEqual(float(out[0]["pts"][:, 0].max()), 40.0)
+
+
 class WallRunsTest(unittest.TestCase):
     def test_no_wall_under_a_bridge_deck(self):
         # the Bruce Highway (the user's report, 2026-10-21): beside a motorway under an overpass the ground is the
