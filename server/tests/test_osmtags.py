@@ -330,5 +330,53 @@ class TableSaveTest(unittest.TestCase):
         self.check(False)
 
 
+
+class ReachTest(unittest.TestCase):
+    """MapData._osm_reach: a segment reaching into the cell from its source way outside it gets that way's tags (Warsaw's
+    Aleja Jozefa Becka: no tags in the next cell, so another width there and a sidewalk on its median side)."""
+
+    def reach(self, more, tags=None):
+        import types
+        import mapdata
+        from test_roads import LAT, LON, M_LAT, M_LON, features
+        # the cell: 0..200 m east, -100..100 m north; one road inside it, one reaching 300 m out of it to the west,
+        # one reaching out whose way has no tags anywhere
+        f = features([[(10, 0), (190, 0)], [(-300, 20), (50, 20)], [(150, 40), (400, 40)]], ["primary"] * 3)
+        f.attrs["src_record"] = np.array(["w5@1", "w6@2", "w7@1"])
+        key = types.SimpleNamespace(bounds=lambda: (LON, LAT - 100 / M_LAT, LON + 200 / M_LON, LAT + 100 / M_LAT))
+        asked = []
+
+        def cell(key_, kind, bounds=None):
+            asked.append(bounds)
+            return more, [{"id": 99}]
+        stub = types.SimpleNamespace(_osm_cell=cell)
+        got = mapdata.MapData._osm_reach(stub, key, "demand", f, ({5: {"lanes": 2}} if tags is None else tags, []))
+        return got, asked, (LON, M_LON)
+
+    def test_the_way_outside_is_asked_for_and_only_it_is_taken(self):
+        (tags, ways), asked, (lon, m_lon) = self.reach({6: {"sidewalk": "no"}, 8: {"lanes": 6}})
+        self.assertEqual(tags, {5: {"lanes": 2}, 6: {"sidewalk": "no"}})
+        self.assertEqual(ways, [], "no raceways or busways of the wider box")
+        self.assertEqual(len(asked), 1)
+        self.assertAlmostEqual(asked[0][0], lon - 300 / m_lon, places=6)        # (the reaching segments' box)
+        self.assertAlmostEqual(asked[0][2], lon + 400 / m_lon, places=6)
+
+    def test_nothing_found_or_no_tags_at_all_leaves_them(self):
+        got, asked, _ = self.reach({})
+        self.assertEqual(got, ({5: {"lanes": 2}}, []))
+        got, asked, _ = self.reach({6: {"lanes": 3}}, tags={})
+        self.assertEqual((got, asked), (({}, []), []), "the source failed: not asked again")
+
+    def test_segments_inside_the_cell_ask_nothing(self):
+        import types
+        import mapdata
+        from test_roads import LAT, LON, M_LAT, M_LON, features
+        f = features([[(10, 0), (190, 0)]], ["primary"])
+        f.attrs["src_record"] = np.array(["w6@2"])
+        key = types.SimpleNamespace(bounds=lambda: (LON, LAT - 100 / M_LAT, LON + 200 / M_LON, LAT + 100 / M_LAT))
+        stub = types.SimpleNamespace(_osm_cell=lambda *a, **k: self.fail("asked"))
+        self.assertEqual(mapdata.MapData._osm_reach(stub, key, "demand", f, ({5: {}}, [])), ({5: {}}, []))
+
+
 if __name__ == "__main__":
     unittest.main()

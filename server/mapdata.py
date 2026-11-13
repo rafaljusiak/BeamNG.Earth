@@ -105,7 +105,10 @@ VERSION = 2                     # pipeline version: bump when what a cell's laye
 # the "src_ways" rule holds each way's range on a segment of several (overture.way_sources)
 # (and PR #471's validated highway lane counts, current-way geometry evidence; merged before roads 8 was released)
 # roads 9: OpenStreetMap's busways appended (osmtags.busway_features). Overture emits none, as with raceways.
-LAYER_VERSIONS = {"roads": 9}
+# roads 10: a segment reaching into the cell from outside gets its own way's tags too (MapData._osm_reach): the cells
+# along one segment gave it different widths and sidewalks
+LAYER_VERSIONS = {"roads": 10}
+OSM_REACH_DEG = 0.03            # degrees past a cell's edges its segments' own ways are looked for (_osm_reach)
 # (LidarBC's measured canopy heights, maprasters.bc_canopy, are opt-in: BNE_BC_CANOPY=1 fills cells built after it;
 # no canopy version bump, which would fetch every player's canopy cells again)
                                 # (2: clipped polygon pieces `own`ed by their cell, exact cell edges,
@@ -446,7 +449,7 @@ class MapData:
             osm = self._osm_pool().submit(self._osm_cell, key, kind) if layer == "roads" else None
             feats, sources = self.overture.query(layer, key, kind)
             if osm is not None:
-                feats = self._osm(feats, osm.result(),
+                feats = self._osm(feats, self._osm_reach(key, kind, feats, osm.result()),
                                   lambda need: self.osmtags.highway_geometry(key.bounds(), kind, need))
             ox, oy = mapcells.owner(feats.attrs.get("cx", np.zeros(0)), feats.attrs.get("cy", np.zeros(0)), key.z)
             feats.own = (ox == key.x) & (oy == key.y)
@@ -476,9 +479,55 @@ class MapData:
                 self._osm_ex = ThreadPoolExecutor(OSM_THREADS, thread_name_prefix="osmtags")
             return self._osm_ex
 
-    def _osm_cell(self, key, kind):
+    def _osm_reach(self, key, kind, feats, got):
+        """got ((tags, extra ways), _osm_cell's) with the tags of the ways that lie outside the cell but are the source
+        way of a road segment reaching into it. Overture joins several OpenStreetMap ways into one segment and
+        names one of them as its source; the cell's tags are those of the ways whose box touches the cell, so in a
+        cell that segment crosses away from its source way it had no tags at all: there it took its class's guesses
+        (Warsaw's Aleja Jozefa Becka, 2026-11-13: one carriageway of the Trasa Siekierkowska, sidewalk=no, oneway,
+        2 lanes on its flyover's way; in the next cell the same segment was 6.6 m wide instead of 9.5 m, without a
+        median, with a raised sidewalk on both sides, the left one beginning between the lanes at the fork it
+        starts from). Asked once more for the box of those segments (OSM_REACH_DEG past the cell at most); only
+        their own ways are taken from the answer. Never raises on demand: the tags as they were."""
+        tags, ways = got
+        recs = feats.attrs.get("src_record") if feats is not None and len(feats) else None
+        if not tags or recs is None:            # (no tags at all: the source failed or holds nothing here)
+            return got
+        import osmtags
+        lon0, lat0, lon1, lat1 = key.bounds()
+        want, box = set(), None
+        for i in range(len(feats)):
+            if int(feats.kind[i]) != mapgeom.LINE:
+                continue
+            w = osmtags.way_id(str(recs[i]))
+            if w is None or w in tags:
+                continue
+            a = feats.coord_off[feats.ring_off[feats.part_off[i]]]
+            b = feats.coord_off[feats.ring_off[feats.part_off[i + 1]]]
+            if b - a < 2:
+                continue
+            ll = np.asarray(feats.lonlat[a:b], np.float64)
+            lo, hi = ll.min(0), ll.max(0)
+            if lo[0] >= lon0 and lo[1] >= lat0 and hi[0] <= lon1 and hi[1] <= lat1:
+                continue                        # (all in the cell: its way has none of the tags)
+            want.add(w)
+            cur = (float(lo[0]), float(lo[1]), float(hi[0]), float(hi[1]))
+            box = cur if box is None else (min(box[0], cur[0]), min(box[1], cur[1]), max(box[2], cur[2]),
+                                           max(box[3], cur[3]))
+        if not want:
+            return got
+        r = OSM_REACH_DEG
+        box = (max(box[0], lon0 - r), max(box[1], lat0 - r), min(box[2], lon1 + r), min(box[3], lat1 + r))
+        more, _ways = self._osm_cell(key, kind, box)
+        found = {w: more[w] for w in want if w in more}
+        if not found:
+            return got
+        return {**tags, **found}, ways
+
+    def _osm_cell(self, key, kind, bounds=None):
         """(tags, extra ways) of the cell's OpenStreetMap highways (osmtags.py); none when the source fails (the roads
-        keep their width guesses). Extra ways are the raceways and busways Overture does not emit."""
+        keep their width guesses). Extra ways are the raceways and busways Overture does not emit. bounds: another
+        box (lon0, lat0, lon1, lat1) than the cell's (_osm_reach)."""
         import osmtags
         if self.fetcher is None:
             return {}, []
@@ -486,7 +535,7 @@ class MapData:
             with self._lock:
                 if getattr(self, "osmtags", None) is None:
                     self.osmtags = osmtags.OsmTags(self.raw_dir, self.fetcher)
-            return self.osmtags.cell(key.bounds(), kind)
+            return self.osmtags.cell(key.bounds() if bounds is None else bounds, kind)
         except DEFERRED:
             # a prefetch the host had no room for: the cell is not built now (MapData.prefetch: False) rather than cached
             # for good without its tags (a player's start cell in Baltimore kept the roads' guesses, 2026-10-23); on
