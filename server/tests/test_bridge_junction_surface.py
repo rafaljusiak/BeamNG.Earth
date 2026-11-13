@@ -311,6 +311,41 @@ class BridgeJunctionSurfaceTest(unittest.TestCase):
                     incoming = next(c for c in ctx if c['fid'] == 'a')
                     np.testing.assert_allclose(np.array(incoming['n'])[:, 1], 1.25, atol=.001)
 
+    def test_a_deck_sidewalk_stops_at_a_carriageway_crossing_it(self):
+        # (Warsaw, Aleja Niepodleglosci over the Trasa Lazienkowska's tunnel: a junction's links on decks, each one's
+        # strip of pale concrete across the lanes of the next)
+        spec = roads.Spec(8., 'paved', True, 'primary', False)
+        street = ('s', spec, np.array([[-60., 0., 20.], [60., 0., 20.]]), 7.72)
+        side = ('t', spec, np.array([[0., 0., 20.], [0., 60., 20.]]), 7.72)         # joins it from the left
+        over = ('o', spec, np.array([[30., -40., 27.], [30., 40., 27.]]), 7.72)     # passes 7 m over it
+        on = ('n', roads.Spec(12., 'paved', True, 'primary', False), np.array([[60., 0., 20.], [90., 0., 20.]]), 7.72)
+        box = (-80., -80., 100., 80.)
+
+        def strips(parts):
+            out = roads._deck_chunks(parts, box, walks={'s': (2.5, [1])})
+            return sorted((np.array(c['n'])[:, 0].min(), np.array(c['n'])[:, 0].max())
+                          for c in out if c['m'] == roads.DECK_WALK['m'] and not c.get('ctx'))
+        whole = strips([street])
+        self.assertEqual(len(whole), 1)
+        np.testing.assert_allclose(whole[0], (-60., 60.), atol=0.01)
+        cut = strips([street, side, over, on])
+        self.assertEqual(len(cut), 2, "open across the side street's lanes, whole under the deck passing over")
+        self.assertAlmostEqual(cut[0][0], -60., delta=0.01)
+        self.assertLess(cut[0][1], -4.0)
+        self.assertGreater(cut[0][1], -6.5)
+        self.assertGreater(cut[1][0], 4.0)
+        self.assertLess(cut[1][0], 6.5)
+        self.assertAlmostEqual(cut[1][1], 60., delta=0.01, msg="to its end where a wider deck goes on straight")
+
+    def test_walk_off_decks_drops_a_scrap_between_two_carriageways(self):
+        line = np.c_[np.linspace(0., 40., 41), np.full(41, 5.25), np.full(41, 20.03)]
+        cross = lambda x: (np.array([[x, -20.], [x, 20.]]), np.array([20., 20.]), 4.0)
+        runs = roads._walk_off_decks(line, 2.5, [cross(15.), cross(26.)])
+        self.assertEqual(len(runs), 2)          # (the metre between them left out: DECK_WALK_MIN_M)
+        self.assertLess(runs[0][-1, 0], 11.0)
+        self.assertGreater(runs[1][0, 0], 30.0)
+        self.assertEqual(len(roads._walk_off_decks(line, 2.5, [])), 1)
+
     def test_one_unsupported_arm_excludes_the_whole_connected_fork(self):
         parts = [(c['fid'], roads.Spec(c['w'], 'paved', True, 'primary', False), np.array(c['n']), 7.72)
                  for c in fork()]
