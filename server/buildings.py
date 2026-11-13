@@ -341,7 +341,7 @@ def oriented_box(p):
 class Spec:
     """What is built for one footprint (decided by plan())."""
     __slots__ = ("ring", "floors", "floor_h", "height", "roof", "roof_mat", "facade", "band", "shop", "plain", "min_h", "wall", "door", "windows", "front", "steeple", "stoop",
-                 "sign", "porch", "cls", "seed", "deck", "pitch", "portal", "gring", "ship", "fr_house", "lod2")
+                 "sign", "porch", "cls", "seed", "deck", "pitch", "portal", "gring", "ship", "fr_house", "lod2", "block")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -360,14 +360,21 @@ class Style:
     (the US's and Scandinavia's; elsewhere their siding colours: a Lauterbrunnen garage row came out a 150 m red
     wall, 2026-10-15); attached: low attached buildings (terraces, old town
     blocks) with a pitched roof (the US: flat; Amsterdam's canal houses, Europe's old towns: gables).
-    Coarse boxes by region until a facade-material map; the US ones keep their earlier behaviour."""
+    Coarse boxes by region until a facade-material map; the US ones keep their earlier behaviour.
+    blocks: blocks of flats (plan's _block: a flat-roofed residential slab or tower) have the precast panel look (the
+    sheet's square windows), block_floor_m storeys, block_paint of them repainted in pastels (the insulated blocks of
+    Central Europe); residential_glass: tall residential buildings may be glass towers (False: masonry);
+    attached_floor_m: the storey of attached residential buildings (old town tenements; None: FLOOR_M)."""
 
     def __init__(self, name, brick, walls, porch, flat, hipped, roofs, pitch=None, paint=0.3, wall_tints=None,
-                 wood=False, attached=0.0, barn_red=0.0, stone=0.0):
+                 wood=False, attached=0.0, barn_red=0.0, stone=0.0, blocks=False, block_floor_m=FLOOR_M,
+                 block_paint=0.0, residential_glass=True, attached_floor_m=None):
         self.name, self.brick, self.walls, self.porch, self.flat = name, brick, walls, porch, flat
         self.barn_red, self.stone = barn_red, stone
         self.hipped, self.roofs, self.pitch, self.paint, self.wall_tints = hipped, roofs, pitch, paint, wall_tints
         self.wood, self.attached = wood, attached
+        self.blocks, self.block_floor_m, self.block_paint = blocks, block_floor_m, block_paint
+        self.residential_glass, self.attached_floor_m = residential_glass, attached_floor_m
 
 
 _US_ROOFS = ((ROOF_SLATE, (0, 1, 2, 3)), (ROOF_SHINGLE, (0, 1, 2, 3)))
@@ -410,8 +417,12 @@ STYLES = {
     # brick or block (the brick shows in old towns and on pre-war tenements only), houses with plaster walls under
     # 30-35 degree roofs of red-brown tile or dark sheet metal tiles, hipped as often as gabled, some flat or nearly
     # flat (the post-war "kostka" cube house); blocks of flats flat-roofed; few attached houses outside old towns
+    # its blocks of flats (wielka plyta and the brick-and-plaster blocks before it): 2.8 m storeys, square windows in
+    # grey or white panels, a third repainted in pastels when insulated; old town tenements' tall storeys; no glass
+    # blocks of flats
     "poland": Style("poland", 0.12, ((STUCCO, 0.8),), 0.02, 0.12, 0.45, (_CLAY, _DARK), pitch=33.0, paint=0.08,
-                    wall_tints=(0, 1, 2, 3, 4), attached=0.3),
+                    wall_tints=(0, 1, 2, 3, 4), attached=0.3, blocks=True, block_floor_m=2.8, block_paint=0.35,
+                    residential_glass=False, attached_floor_m=3.5),
 }
 
 # Poland's border, coarse (lat, lon; ~10-20 km off in places): region_style stays a pure function of the position (no
@@ -532,6 +543,52 @@ def _landmark_token(spec):
     return (MATERIALS.index(LANDMARK_MATERIALS[landmarks.material(spec.facade)]), landmarks.colour(spec.facade))
 
 
+RESIDENTIAL_CLASSES = {"apartments", "residential", "dormitory"}
+BLOCK_CLASSES = RESIDENTIAL_CLASSES | {""}      # (a block of flats is often mapped without a class)
+BLOCK_TINTS = ("bne_bld_fac_white", "bne_bld_fac_grey", "bne_bld_fac_grey", "bne_bld_fac_cream")
+BLOCK_SLAB_DEPTH_M = (9.0, 15.5)    # m: a slab block's depth (two flats and a staircase: 10-13 m)
+BLOCK_SLAB_RATIO = 1.5              # ... at least this much longer than deep (a staircase's segment: ~1.7)
+BLOCK_SLAB_FILL = 0.88              # ... and this rectangular (a tenement's annexes and light wells are not)
+BLOCK_TOWER_M = (14.0, 45.0)        # m: a tower block's sides
+BLOCK_TOWER_FILL = 0.7
+BLOCK_SLAB_FLOORS, BLOCK_TOWER_FLOORS = 4, 8
+BLOCK_TENEMENT_FLOORS = 6           # an attached residential building in a dense core up to this high: a tenement
+BLOCK_TENEMENT_M = 24.0             # ... or this high (its eaves)
+BLOCK_PREDICTED_M2 = 300.0          # m²: a block of flats with no height or floors mapped is at least this large
+
+
+def _block(cls, area, hl, hw, box_fill, floors, predicted, neighbours=0, dense=False, height=None):
+    """'slab', 'tower' or None: whether a flat-roofed building is a block of flats. Mapped as flats (residential,
+    apartments, dormitory): from BLOCK_SLAB_FLOORS floors (mapped, or its height in the region's block storeys) whatever
+    its shape (Ursynow's and Brodno's blocks are staggered or L-shaped: their box is half empty), but for an attached one
+    in a dense core of up to BLOCK_TENEMENT_FLOORS mapped floors or BLOCK_TENEMENT_M high (an old town's tenement: its
+    tall storeys); with neither height nor floors mapped
+    (predicted), one BLOCK_PREDICTED_M2 large. Without a class: only a rectangular slab BLOCK_SLAB_DEPTH_M deep or a
+    compact tower BLOCK_TOWER_FLOORS high. 'slab' when BLOCK_SLAB_RATIO times longer than deep. Pure."""
+    if cls not in BLOCK_CLASSES:
+        return None
+    depth, length = 2.0 * float(hw), 2.0 * float(hl)
+    kind = "slab" if length >= BLOCK_SLAB_RATIO * depth else "tower"
+    if cls in RESIDENTIAL_CLASSES:
+        if predicted:
+            return kind if area >= BLOCK_PREDICTED_M2 else None
+        if floors is None or floors < BLOCK_SLAB_FLOORS - 0.5:
+            return None
+        if neighbours >= 1 and dense and (floors <= BLOCK_TENEMENT_FLOORS if height is None
+                                           else height <= BLOCK_TENEMENT_M):
+            return None
+        return kind
+    if predicted or floors is None:
+        return None
+    if (box_fill >= BLOCK_SLAB_FILL and BLOCK_SLAB_DEPTH_M[0] <= depth <= BLOCK_SLAB_DEPTH_M[1]
+            and length >= BLOCK_SLAB_RATIO * depth and floors >= BLOCK_SLAB_FLOORS):
+        return "slab"
+    if (box_fill >= BLOCK_TOWER_FILL and depth >= BLOCK_TOWER_M[0] and length <= BLOCK_TOWER_M[1]
+            and floors >= BLOCK_TOWER_FLOORS):
+        return "tower"
+    return None
+
+
 @profile_step('Building plan')
 def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, dense=False, west_town=False,
          alpine=False):
@@ -579,6 +636,7 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
 
     h = attrs.get("height")
     nf = attrs.get("num_floors")
+    predicted = (h is None or not np.isfinite(h) or h <= 0) and (nf is None or not np.isfinite(nf) or nf <= 0)
     if terminal and (h is None or not np.isfinite(h)) and (nf is None or not np.isfinite(nf)):
         h, nf = 13.0, 2                                 # an airport terminal: two tall glass storeys
     if garage and (h is None or not np.isfinite(h)) and (nf is None or not np.isfinite(nf)):
@@ -690,6 +748,19 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
     elif roof != "flat" and not lod2 and (box_fill < (0.6 if church else 0.8) or hw < 2.0
                                           or hw > (18.0 if barn else 20.0 if church else 14.0)):
         roof = "flat"
+    block = None
+    if style.blocks and roof == "flat" and not (shop or industrial or shed or barn or church or garage or terminal):
+        block = _block(cls, area, hl, hw, box_fill, nf if nf is not None else (h / style.block_floor_m if h else None),
+                       predicted, neighbours, dense, None if nf is not None else h)
+    if block is not None:
+        floor_h = style.block_floor_m
+        if predicted:               # (no height, no floors mapped: a slab of 4-5 or 10-11, a tower of 11-16)
+            u = _hash01(seed, "block floors")
+            nf = (4 if u < 0.3 else 5 if u < 0.65 else 10 if u < 0.8 else 11) if block == "slab" \
+                else 11 + int(u * 6)
+    elif (style.attached_floor_m and neighbours >= 1 and cls in BLOCK_CLASSES and not row
+          and not (shop or industrial or shed or barn or church or garage or terminal)):
+        floor_h = style.attached_floor_m        # an old town's tenement
     # a city tower's ground floor is shops or a lobby (Midtown, 2026-10-14: most towers have no class, and their
     # curtain wall came down to the pavement)
     tall = (nf or (h or 0) / FLOOR_M) >= TOWER_SHOP_FLOORS
@@ -727,7 +798,15 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
         modern = cls in ("office", "commercial", "hotel") and u_glass < MIDRISE_GLASS_OFFICE
         tall = snf >= GLASS_FLOORS[1] or (snf >= GLASS_FLOORS[0] and (modern or u_glass < OLD_TOWER_GLASS)) \
             or (snf >= 7 and modern)
-        if snf >= 7 and not tall and not industrial:
+        if tall and not style.residential_glass and (block is not None or cls in RESIDENTIAL_CLASSES):
+            tall = False
+        if block is not None:       # a block of flats: square windows in panels, white, grey or repainted
+            if _hash01(seed, "block paint") < style.block_paint:
+                facade = PAINT_TINTS[int(_hash01(seed, "pc") * len(PAINT_TINTS))]
+            else:
+                facade = BLOCK_TINTS[int(_hash01(seed, "block tint") * len(BLOCK_TINTS))]
+            band = BAND_PANEL
+        elif snf >= 7 and not tall and not industrial:
             if _hash01(seed, "brick") < brick_share(lat, lon) * 1.2:
                 facade, band = BRICK_TINTS[int(seed * 7919) % len(BRICK_TINTS)], BAND_BRICK
             else:
@@ -755,7 +834,7 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
         plain = False
     wall = None
     house = (cls in HOUSE_CLASSES or (area < 260 and not shop and not industrial)) and not row and not shed \
-        and neighbours == 0 and area < 300         # a long "residential" block is not a house (Fells Point)
+        and neighbours == 0 and area < 300 and block is None    # a long "residential" block is not a house
     if house and band is not BAND_BRICK and nf <= 3:
         # detached houses: siding in the East and South, stucco in the West; windows laid over the wall
         u = _hash01(seed, "wall")
@@ -876,7 +955,7 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
     if porch:   # pitched roofs draw the walls on the oriented box: an L-shaped house's door wall can be inside it
         _, _, hl, hw = oriented_box(ring)
         porch = area >= 0.9 * 4 * hl * hw
-    spec = Spec(ring=ring, floors=nf, floor_h=floor_h, height=h, roof=roof, roof_mat=roof_mat, facade=facade,
+    spec = Spec(ring=ring, floors=nf, floor_h=floor_h, height=h, roof=roof, roof_mat=roof_mat, facade=facade, block=block,
                 band=band, shop=shop and not shed and nf >= 1, plain=plain, seed=seed, min_h=0.0, wall=wall,
                 windows=windows, steeple=church and area < 2500 and roof not in DOME_ROOFS, porch=porch, cls=cls,
                 deck=garage and roof == "flat",
@@ -2748,9 +2827,58 @@ class _Lod2:
         if nf is not None and not (np.isfinite(nf) and nf > 0):
             at["num_floors"] = None
         h = m.eave if m.eave >= 2.0 else m.top
+        # (the look keyed on the largest donor: the segments of one mapped block, a model each, look alike in
+        # every tile)
         at.update(height=max(h, 2.0), roof_shape="flat" if m.flat >= LOD2_FLAT else "gabled", lod2=k,
-                  seed_id=f"lod2:{m.id}", min_height=None, roof_height=None)
+                  seed_id=at.get("seed_id") or f"lod2:{m.id}", min_height=None, roof_height=None)
         return at
+
+
+BLOCK_TOUCH_M = 0.6         # m: blocks of flats this close are one block (its staircase segments: one colour)
+
+
+def _block_colours(items):
+    """The segments of one block of flats (GUGiK and BDOT10k split a long block at its staircases; plan() hashed each
+    its own colour: a yellow segment beside a grey one) take one facade: the largest segment's. Touching blocks
+    (BLOCK_TOUCH_M: a vertex of one that near an edge of the other) are one; in place."""
+    idx = [k for k, it in enumerate(items) if getattr(it[0], "block", None)]
+    if len(idx) < 2:
+        return
+    rings = [np.asarray(items[k][0].ring, np.float64) for k in idx]
+    box = np.array([(*r.min(0), *r.max(0)) for r in rings])
+    parent = list(range(len(idx)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def near(a, b):
+        p = a[:, None, :]
+        q0, q1 = b, np.roll(b, -1, 0)
+        d = q1 - q0
+        t = np.clip(((p - q0) * d).sum(-1) / np.maximum((d * d).sum(-1), 1e-12), 0, 1)
+        return bool((np.hypot(*(p - (q0 + t[..., None] * d)).transpose(2, 0, 1)) < BLOCK_TOUCH_M).any())
+
+    t = BLOCK_TOUCH_M
+    for i in range(len(idx)):
+        for j in range(i + 1, len(idx)):
+            if (box[i, 0] > box[j, 2] + t or box[j, 0] > box[i, 2] + t or box[i, 1] > box[j, 3] + t
+                    or box[j, 1] > box[i, 3] + t):
+                continue
+            if near(rings[i], rings[j]) or near(rings[j], rings[i]):
+                parent[find(i)] = find(j)
+    groups = {}
+    for i in range(len(idx)):
+        groups.setdefault(find(i), []).append(i)
+    for g in groups.values():
+        if len(g) < 2:
+            continue
+        lead = max(g, key=lambda i: (abs(_area2(rings[i])), -i))
+        fac = items[idx[lead]][0].facade
+        for i in g:
+            items[idx[i]][0].facade = fac
 
 
 @profile_step('Building site selection')
@@ -2814,7 +2942,8 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
                     continue
                 if a.get("src_record") is not None and landmarks.of(a["src_record"][i]) is not None:
                     lod2.suppress(lring)                    # (a landmark's own model)
-                elif lod2.replaces(lring, {k_: (a[k_][i] if k_ in a else None) for k_ in LOD2_LENT}):
+                elif lod2.replaces(lring, {**{k_: (a[k_][i] if k_ in a else None) for k_ in LOD2_LENT},
+                                           "seed_id": None if key is None else f"lod2:{key}"}):
                     if key is not None:
                         seen.add(key)
                     continue
@@ -3050,6 +3179,7 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
                 g = np.full(len(g), got[1])     # its floor on the deck (a pier's bait shop stood on the seabed)
         spec.gring = g              # the ground at each corner (door_ground: the door's, not the footprint's highest)
         out.append((spec, float(g.min()), float(g.max())))
+    _block_colours(out)
     lines = roads_xy if roads_xy else ml_roads_xy
     if lines and out:
         isl = _toll_islands(frame, layers, parts_of, lines, x0, y0)

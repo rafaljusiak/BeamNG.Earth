@@ -90,6 +90,54 @@ class RegionStyleTest(unittest.TestCase):
                          lat=52.24, lon=21.09)
         self.assertEqual(block.roof, "flat")
 
+    def test_block(self):
+        b = bld._block
+        self.assertEqual(b("apartments", 720, 30, 6, 0.95, 11, False), "slab")
+        self.assertEqual(b("apartments", 500, 12, 11, 0.9, 11, False), "tower")
+        self.assertEqual(b("apartments", 1500, 40, 15, 0.45, 5, False), "slab", "a staggered or L-shaped block")
+        self.assertIsNone(b("apartments", 600, 15, 10, 0.95, 3, False), "too low")
+        self.assertIsNone(b("apartments", 600, 15, 10, 0.95, 5, False, 2, True), "an old town's tenement")
+        self.assertIsNone(b("apartments", 600, 15, 10, 0.95, 7, False, 2, True, 20.0), "... by its height")
+        self.assertEqual(b("apartments", 600, 15, 11, 0.95, 9, False, 2, True, 30.0), "tower")
+        self.assertEqual(b("", 720, 30, 6, 0.95, 11, False), "slab", "no class: a clean slab")
+        self.assertIsNone(b("", 1500, 40, 15, 0.45, 5, False), "no class: not any shape")
+        self.assertIsNone(b("office", 720, 30, 6, 0.95, 11, False))
+        self.assertEqual(b("apartments", 720, 30, 6, 0.95, None, True), "slab", "no height or floors: by its class")
+        self.assertIsNone(b("", 720, 30, 6, 0.95, None, True))
+
+    def test_poland_blocks(self):
+        slab = rect(0, 0, 60, 12)
+        s = bld.plan(slab, {"class": "apartments", "height": 30.8, "num_floors": None}, lat=52.15, lon=21.05)
+        self.assertEqual(s.block, "slab")
+        self.assertEqual(s.band, bld.BAND_PANEL)
+        self.assertEqual(s.floors, 11, "2.8 m storeys")
+        self.assertIsNone(s.wall)
+        tall = bld.plan(rect(0, 0, 25, 22), {"class": "apartments", "num_floors": 25}, lat=52.15, lon=21.05)
+        self.assertNotIn(bld.OFFICE, tall.facade, "no glass blocks of flats")
+        self.assertEqual(tall.band, bld.BAND_PANEL)
+        floors = {bld.plan(slab + k * 100, {"class": "apartments"}, lat=52.15, lon=21.05).floors for k in range(60)}
+        self.assertEqual(floors, {4, 5, 10, 11}, "no height mapped: a slab of 4-5 or 10-11")
+        ten = bld.plan(rect(0, 0, 20, 16), {"class": "apartments", "height": 20.0}, neighbours=2, lat=52.23,
+                       lon=21.01, dense=True)
+        self.assertIsNone(ten.block)
+        self.assertEqual(ten.floors, 6, "3.5 m storeys")
+        small = bld.plan(rect(0, 0, 12, 20), {"class": "", "height": 14.0}, lat=52.15, lon=21.05)
+        self.assertEqual(small.block, "slab")
+        self.assertIsNone(small.wall, "a block is no house (240 m², alone)")
+        us = bld.plan(slab, {"class": "apartments", "height": 30.8}, lat=39.29, lon=-76.61)
+        self.assertIsNone(us.block, "the US as before")
+        self.assertEqual(us.floors, 10)
+
+    def test_one_block_one_colour(self):
+        def spec(r, look):
+            s = bld.plan(r, {"class": "apartments", "height": 30.8}, lat=52.15, lon=21.05, look=look)
+            return (s, 0.0, 0.0)
+        items = [spec(rect(0, 0, 25, 12), 0.1), spec(rect(25, 0, 25, 12), 0.7), spec(rect(25.3, 20, 25, 12), 0.9)]
+        items[0][0].facade, items[1][0].facade, items[2][0].facade = "a", "b", "c"
+        bld._block_colours(items)
+        self.assertEqual(items[0][0].facade, items[1][0].facade)
+        self.assertEqual(items[2][0].facade, "c", "a block across the yard: its own")
+
     def test_south_asia_houses(self):
         hs = self.houses(28.61, 77.21)                  # Delhi, India
         self.assertFalse(any(h.porch for h in hs), "no American porches in South Asia")

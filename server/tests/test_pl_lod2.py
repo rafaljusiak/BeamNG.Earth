@@ -350,6 +350,14 @@ class TileTest(unittest.TestCase):
         self.assertEqual(mods["B1"].roof, "flat")
         self.assertEqual(mods["H1"].ring.shape, self.models[0].ring.shape)
 
+    def test_look_keyed_on_the_donor(self):
+        # a model's look is keyed on its largest donor (the segments of one mapped block, a model each, look alike in
+        # every tile), else on its own id
+        items = self.items([("whole", self.ll(39, -1, 22, 22), "apartments", np.nan, "")])
+        seeds = {s.lod2.id: s.seed for s, _, _ in items if s.lod2 is not None}
+        self.assertEqual(seeds["B1"], bld._hash01("lod2:whole", "plan"))
+        self.assertEqual(seeds["H1"], bld._hash01("lod2:H1", "plan"))
+
     def test_off_and_canopy(self):
         feats = [("a", self.ll(0.3, 0.2, 9.5, 7.6), "house", 2.0, "")]
         self.assertTrue(all(s.lod2 is None for s, _, _ in self.items(feats, models=False)))
