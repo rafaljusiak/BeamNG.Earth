@@ -3132,16 +3132,34 @@ TIE_EASE_GRADE = 0.025          # rise over run of the easing from the tied heig
 TIE_EASE_MIN_M = 20.0           # ... over this at the least
 
 
+TIE_APART_M = 2.0           # m: a branch that goes on over the part it leaves is its own deck once its solve is this
+                            # far off that part's (_tie_beside's apart)
 TIE_MEASURED_M = 0.5        # m: a part whose heights a source measured (roadz: the lidar) is held at its road's
                             # only this near it (the two measured apart at a fork), never a level apart: the tie had
                             # pulled measured ramps by I-395 1.6 and 4.9 m off the lidar's
 
 
-def _tie_beside(lines, zs, specs, measured=None):
+def _apart_pairs(lines, levels, widths=None):
+    """{frozenset((i, j))}: the parts of different levels one of which crosses over the other (_deck_crossings) or
+    runs over it (_deck_stacks): the pairs deck_profile solves a clearance apart there, which neither
+    _merge_overlaps nor _tie_beside may bring together again. Pure."""
+    if levels is None or len(lines) < 2:
+        return set()
+    out = {frozenset((i, j)) for i, j, _si, _sj in _deck_crossings(lines) if levels[i] != levels[j]}
+    if widths is not None:
+        out |= {frozenset((hi, lo)) for hi, _sh, lo, _sl in _deck_stacks(lines, levels, widths)}
+    return out
+
+
+def _tie_beside(lines, zs, specs, measured=None, apart=None):
     """zs with each branch (a ramp, else the narrower part) that leaves or joins another part (its end on that part's
     deck) held at
     that part's height while their slabs are joined (TIE_*), eased into its own profile after. lines: (k, >= 2) per
-    part, zs: heights per point, specs: their Specs. Pure."""
+    part, zs: heights per point, specs: their Specs. apart: _apart_pairs' pairs: a branch that comes back over the
+    part it leaves is held only until its own profile is TIE_APART_M off that part's, not for as long as their
+    slabs lie within TIE_JOIN_M (the ramp of Warsaw's Trasa Siekierkowska runs beside its carriageway for 280 m and
+    then crosses over it: held at the carriageway's height all the way, 1.4 m over it at the crossing instead of
+    the 7.6 m it was solved at, 2026-11-13). Pure."""
     zs = [np.asarray(z, np.float64).copy() for z in zs]
     pts = [np.asarray(ln, np.float64)[:, :2] for ln in lines]
     n = len(pts)
@@ -3214,6 +3232,7 @@ def _tie_beside(lines, zs, specs, measured=None):
                     sep = k
                     break
                 if abs(zj - zs[i][k]) > (TIE_MEASURED_M if measured is not None and measured[i]
+                                         else TIE_APART_M if apart and frozenset((i, j)) in apart
                                          else 2.0 + abs(arcs[i][k] - s0) * 0.1):
                     sep = k                             # (another level: stacked, not side by side)
                     break
@@ -3259,11 +3278,44 @@ def _ground_pins(lines, ground_lines):
     return list(fast.deck_ground_pins(ends, ground_lines, PIN_ROAD_M, PIN_M))
 
 
-def _merge_overlaps(lines, zs, widths, levels, rounds=3, pins=None):
+def _fork_lines(lines, i, j, reach):
+    """lines with parts i and j kept only along their fork: from each end they share, while the part stays within
+    reach m of the other's line in plan; their points past that moved far off (the same count of points, so the
+    heights stay one per point), where no merge finds them (_merge_overlaps' apart). Pure."""
+    out = list(lines)
+    src = [np.asarray(lines[k], np.float64) for k in (i, j)]
+    for k, (a, b, far) in enumerate(((src[0], src[1], 1e7), (src[1], src[0], -1e7))):
+        p, q = a[:, :2], b[:, :2]
+        ab = np.diff(q, axis=0)
+        l2 = np.maximum((ab * ab).sum(1), 1e-12)
+        t = np.clip(((p[:, None, :] - q[None, :-1]) * ab[None]).sum(2) / l2[None], 0.0, 1.0)
+        d = np.hypot(*(p[:, None, :] - (q[None, :-1] + t[..., None] * ab[None])).transpose(2, 0, 1)).min(1)
+        keep = np.zeros(len(p), bool)
+        for end in (0, -1):
+            if min(np.hypot(*(p[end] - q[0])), np.hypot(*(p[end] - q[-1]))) >= 0.75:
+                continue
+            order = range(len(p)) if end == 0 else range(len(p) - 1, -1, -1)
+            for at in order:
+                if d[at] > reach:
+                    break
+                keep[at] = True
+        moved = a.copy()
+        moved[~keep, 0] += far
+        out[(i, j)[k]] = moved
+    return out
+
+
+def _merge_overlaps(lines, zs, widths, levels, rounds=3, pins=None, apart=None):
     """Heights of decks lying over each other (a ramp leaving the mainline, parallel carriageways of
     one level) pulled to their mean where their surfaces overlap, so a split is one surface until the
     decks part (2026-10-11 the user: exits and splits not clean). Parts are related when they share an
-    end node or a level and run within ~30 degrees of each other. Abutment ends stay (pins: deck_profile's). Pure."""
+    end node or a level and run within ~30 degrees of each other. Abutment ends stay (pins: deck_profile's).
+    apart: {frozenset((i, j))} parts of different levels one of which must clear the other further on
+    (deck_profile's crossings and stacks): such a pair leaving one joint is one surface along its fork only
+    (_fork_lines), not where the upper one comes back over the lower (Warsaw's Trasa Siekierkowska over Rondo
+    Nehru, 2026-11-13: a level 2 ramp and the level 1 carriageway it forks from cross again 280 m on at a shallow
+    angle; the merge pulled the carriageway 5.7 m up under the ramp there, 2.3 m between two decks solved 7.6 m
+    apart, and its twin carriageway with it, into the other ramp). Pure."""
     nodes, edges, adj = _chain_graph(lines)
     deg = np.zeros(len(nodes), int)
     for a, b, _ in edges:
@@ -3306,13 +3358,30 @@ def _merge_overlaps(lines, zs, widths, levels, rounds=3, pins=None):
             for k, (ea, eb, es) in enumerate(edges[:n]):
                 reach[k] = np.minimum(reach[k], zend + DECK_MAX_GRADE * np.minimum(d[ea] + es, d[eb] + (es[-1] - es)))
     import fast
+    forks = []
+    if apart:
+        split = [p for p in pairs if frozenset(p) in apart]
+        if split:
+            pairs = [p for p in pairs if frozenset(p) not in apart]
+            for i, j in sorted({tuple(sorted(p)) for p in split}):
+                both = [p for p in split if tuple(sorted(p)) == (i, j)]
+                forks.append(fast.DeckMerge(_fork_lines(lines, i, j, (float(widths[i]) + float(widths[j])) / 2
+                                                        + MERGE_TOUCH_M), widths, both, [False] * len(both),
+                                            MERGE_TOUCH_M, DUAL_DECK_M))
     merge = fast.DeckMerge(lines, widths, pairs, [levels is not None and levels[i] == levels[j] for i, j in pairs],
-                           MERGE_TOUCH_M, DUAL_DECK_M)
+                           MERGE_TOUCH_M, DUAL_DECK_M) if pairs else None
     for _ in range(rounds):
         new = [z.copy() for z in zs]
         # (every pair's points projected onto the other's line, weighted by overlap and parallelism, in Rust:
         # earthfast.deck_merge_round, 0.75 s of a cold Manhattan road tile in numpy, 2026-11-08)
-        acc, cnt, up = merge.round(zs)
+        if merge is not None:
+            acc, cnt, up = merge.round(zs)
+        else:
+            acc, cnt, up = ([np.zeros(len(z)) for z in zs] for _ in range(3))
+        for fork in forks:                      # (the pairs kept apart: their forks' pull alone; no twin lift)
+            acc2, cnt2, _up2 = fork.round(zs)
+            acc = [x + y for x, y in zip(acc, acc2)]
+            cnt = [x + y for x, y in zip(cnt, cnt2)]
         for i in range(n):
             m = cnt[i] > 0
             new[i][m] = (zs[i][m] + acc[i][m]) / (1 + cnt[i][m])
@@ -3391,7 +3460,10 @@ def deck_profile(lines, ground_fn, crossings=(), clear=None, grade=None, lift=No
             zs = new
             break
         zs = new
-    zs = _merge_overlaps(lines, zs, widths, levels, pins=pins) if widths is not None else zs
+    # (the pairs of different levels one of which was just solved over the other: never pulled together there)
+    apart = {frozenset((i, j)) for i, j, _si, _sj in over if levels[i] != levels[j]}
+    apart |= {frozenset((hi, lo)) for hi, _sh, lo, _sl in stacks}       # (_apart_pairs, from what is at hand)
+    zs = _merge_overlaps(lines, zs, widths, levels, pins=pins, apart=apart) if widths is not None else zs
     return _ease(lines, zs, ground_fn, lift) if bridge_profile_mode() == "curve" else zs
 
 
@@ -6288,7 +6360,9 @@ class BridgeProfiles:
         tl.measured = set()
         zs = self._solve(comp, pool, ground)
         zs = _tie_beside([pool[k][1] for k in comp], zs, [pool[k][0] for k in comp],     # (ramps beside their road)
-                         [k in tl.measured for k in comp])
+                         [k in tl.measured for k in comp],
+                         _apart_pairs([pool[k][1] for k in comp], [pool[k][3] for k in comp],
+                                      [pool[k][0].width for k in comp]))
         with self.lock:
             for k, z in zip(comp, zs):
                 spec, xy, lon = pool[k][:3]

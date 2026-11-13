@@ -183,6 +183,59 @@ class TwinLiftTest(TestCase):
         self.assertAlmostEqual(float(out[0][-1]), float(out[2][0]), delta=0.5)     # (the parts still meet)
 
 
+class RampBackOverItsRoadTest(TestCase):
+    """Warsaw, Trasa Siekierkowska over Rondo Nehru (2026-11-13): a level 2 ramp forks from a level 1 carriageway,
+    runs beside it and crosses over it 280 m on. The solve puts it a clearance over the carriageway there;
+    _merge_overlaps (parts sharing a joint, overlapping in plan) and _tie_beside (slabs within TIE_JOIN_M) brought
+    them together again at the crossing."""
+
+    def parts(self):
+        x = np.arange(0.0, 400.1, 4.0)
+        main = np.c_[x, np.zeros(len(x))]
+        # beside the carriageway to 12 m off it, then back across it at x = 280
+        y = np.interp(x, [0.0, 100.0, 200.0, 280.0, 360.0, 400.0], [0.0, 10.0, 12.0, 0.0, -12.0, -14.0])
+        ramp = np.c_[x, y]
+        zm = np.full(len(x), 20.0)
+        zr = 20.0 + np.interp(x, [0.0, 40.0, 200.0, 400.0], [0.0, 0.0, 7.6, 7.6])
+        return x, main, ramp, zm, zr
+
+    def test_the_pair_is_found(self):
+        _x, main, ramp, _zm, _zr = self.parts()
+        self.assertEqual(roads._apart_pairs([main, ramp], [1.0, 2.0], [8.6, 8.6]), {frozenset((0, 1))})
+        self.assertEqual(roads._apart_pairs([main, ramp], [1.0, 1.0], [8.6, 8.6]), set())
+
+    def test_the_merge_leaves_the_crossing_alone_and_keeps_the_fork(self):
+        x, main, ramp, zm, zr = self.parts()
+        at = int(np.argmin(np.abs(x - 280.0)))
+        old = roads._merge_overlaps([main, ramp], [zm, zr], [8.6, 8.6], [1.0, 2.0])
+        self.assertGreater(float(old[0][at]) - 20.0, 1.0, "the fault: the carriageway pulled up under the ramp")
+        new = roads._merge_overlaps([main, ramp], [zm, zr], [8.6, 8.6], [1.0, 2.0], apart={frozenset((0, 1))})
+        self.assertLess(abs(float(new[0][at]) - 20.0), 0.05)
+        self.assertGreater(float(new[1][at]) - float(new[0][at]), 7.5)
+        np.testing.assert_allclose(new[0][:8], old[0][:8], atol=0.05)       # (the fork: one surface as before)
+        np.testing.assert_allclose(new[1][:8], old[1][:8], atol=0.05)
+
+    def test_no_pair_apart_changes_nothing(self):
+        x, main, ramp, zm, zr = self.parts()
+        a = roads._merge_overlaps([main, ramp], [zm, zr], [8.6, 8.6], [1.0, 2.0])
+        b = roads._merge_overlaps([main, ramp], [zm, zr], [8.6, 8.6], [1.0, 2.0], apart=set())
+        for u, v in zip(a, b):
+            np.testing.assert_array_equal(u, v)
+
+    def test_the_tie_ends_where_the_ramp_has_left_its_road(self):
+        from types import SimpleNamespace
+        x, main, ramp, zm, zr = self.parts()
+        at = int(np.argmin(np.abs(x - 280.0)))
+        specs = [SimpleNamespace(width=8.6, link=False), SimpleNamespace(width=13.1, link=True)]
+        old = roads._tie_beside([main, ramp], [zm, zr], specs)
+        self.assertLess(float(old[1][at]) - 20.0, 6.0, "the fault: the ramp held at its road's height toward the crossing")
+        new = roads._tie_beside([main, ramp], [zm, zr], specs, apart={frozenset((0, 1))})
+        self.assertGreater(float(new[1][at]) - 20.0, 7.5)
+        self.assertAlmostEqual(float(new[1][5]), 20.0, delta=0.05)          # (still its road's deck at the fork)
+        grade = np.abs(np.diff(new[1])) / np.hypot(*np.diff(ramp, axis=0).T)
+        self.assertLess(float(grade.max()), 0.10)
+
+
 class SemiApproachIntegrationTest(TestCase):
     def test_approach_and_generated_deck_clear_six_metres(self):
         fixture = approaches.OverpassIntegrationTest("test_deck_clears_the_lanes")
