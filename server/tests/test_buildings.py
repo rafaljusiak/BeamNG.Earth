@@ -1552,6 +1552,102 @@ class PyramidTest(unittest.TestCase):
         self.assertNotEqual(house.cls, "pyramid", "a house's pyramidal roof: a house")
 
 
+class MarketHallTest(unittest.TestCase):
+    """Praska Giełda Spożywcza, Ząbki (52.27663 N 21.11285 E): halls tagged building=commercial on land mapped
+    landuse=retail + shop=wholesale were multi-storey shops."""
+    LAT, LON = 52.2766, 21.1128
+
+    def test_a_building_on_a_markets_ground_is_a_one_storey_metal_hall(self):
+        heights = set()
+        for k, cls in enumerate(["commercial", "", "yes", "retail", "service", "warehouse"] * 5):
+            ring = rect(k * 100, 0, 60, 20 + k)                 # 1200-3000 m2
+            before = bld.plan(ring, {"class": cls, "seed_id": f"m{k}"}, 0, self.LAT, self.LON)
+            s = bld.plan(ring, {"class": cls, "seed_id": f"m{k}", "market": True}, 0, self.LAT, self.LON)
+            self.assertEqual(s.floors, 1)
+            self.assertGreaterEqual(s.height, 5.0)
+            self.assertLessEqual(s.height, 7.0)
+            self.assertTrue(s.wall.startswith(bld.METALWALL) and s.facade == s.wall)
+            self.assertEqual((s.roof, s.roof_mat.split("|")[0]), ("flat", bld.ROOF_FLAT))
+            self.assertIs(s.windows, False)
+            self.assertFalse(s.shop)
+            self.assertTrue(s.plain, "no storefront band: doors() gives a plain building no front")
+            self.assertEqual(bld.doors([(s, 0.0, 0.0)], [(np.array([(-50.0, -10.0), (9000.0, -10.0)]), 6.0, "primary",
+                                                           True)], 0.0, 0.0), [])
+            self.assertIsNone(s.front)
+            self.assertIsNone(s.sign)
+            heights.add(round(s.height, 2))
+            if cls in ("commercial", "retail"):
+                self.assertTrue(before.shop, "a shop without the market")
+        self.assertGreater(len(heights), 10, "varied by the seed")
+        # in a dense block too (a small building there is a row house), and small ones lower
+        s = bld.plan(rect(0, 0, 12, 8), {"class": "commercial", "market": True}, 1, self.LAT, self.LON, dense=True)
+        self.assertEqual((s.floors, s.windows, s.shop), (1, False, False))
+        self.assertLess(s.height, 4.5)
+
+    def test_mapped_heights_floors_and_other_classes_are_kept(self):
+        ring = rect(0, 0, 60, 20)
+        for extra in ({"height": 12.0}, {"num_floors": 3.0}, {"class": "apartments"}, {"class": "office"},
+                      {"class": "church"}, {"class": "house"}):
+            at = {"class": "commercial", "seed_id": "k", **extra}
+            a = bld.plan(ring, at, 0, self.LAT, self.LON)
+            b = bld.plan(ring, dict(at, market=True), 0, self.LAT, self.LON)
+            self.assertEqual((a.floors, a.height, a.facade, a.wall, a.windows, a.shop, a.roof_mat),
+                             (b.floors, b.height, b.facade, b.wall, b.windows, b.shop, b.roof_mat), extra)
+        s = bld.plan(rect(0, 0, 5, 5), {"class": "yes", "market": True}, 0, self.LAT, self.LON)
+        self.assertTrue(s.facade.startswith(bld.SIDING), "a 25 m2 kiosk stays a shed")
+
+    def test_a_building_named_a_market_is_one(self):
+        for name, hall in (("Bazar Miejski", True), ("Praska Giełda Spożywcza", True), ("Gielda kwiatowa", True),
+                           ("Targowisko Miejskie", True), ("Hala Targowa", True), ("Rynek Hurtowy Bronisze", True),
+                           ("Biedronka", False), ("Bazarek", True), ("Galeria Rynek", False)):
+            s = bld.plan(rect(0, 0, 50, 20), {"class": "retail", "name": name, "seed_id": "n"}, 0, self.LAT, self.LON)
+            self.assertEqual(s.windows is False and s.floors == 1 and str(s.wall).startswith(bld.METALWALL), hall, name)
+
+    def test_market_land_is_found_by_its_tags_or_its_name(self):
+        M = bld.MarketLand.is_market
+        self.assertTrue(M("retail", "Praska Giełda Spożywcza", {"landuse": "retail", "shop": "wholesale"}))
+        self.assertTrue(M("retail", "", {"landuse": "retail", "shop": "wholesale"}))
+        self.assertTrue(M("", "Borough Market", {"amenity": "marketplace"}))
+        self.assertTrue(M("retail", "Targowisko Bakalarska", {"landuse": "retail"}))
+        self.assertFalse(M("retail", "Galeria Mokotów", {"landuse": "retail"}))
+        self.assertFalse(M("retail", "", {"landuse": "retail"}))
+        self.assertFalse(M("industrial", "Giełda", {"landuse": "industrial"}), "the name only on retail land")
+
+    def test_tile_buildings_marks_the_buildings_on_market_land(self):
+        import geodesy
+        f = geodesy.EnuFrame(self.LAT, self.LON)
+
+        def ll(x, y, w, d):
+            e = np.array([x, x + w, x + w, x, x]); n = np.array([y, y, y + d, y + d, y])
+            la, lo, _ = f.enu_to_geodetic(e, n, 0.0)
+            return np.stack([lo, la], 1)
+        nan = np.nan
+        b = Feats(["in", "tall", "flats", "out"], [ll(20, 20, 60, 20), ll(20, 60, 60, 20), ll(20, 100, 40, 20),
+                                                   ll(170, 20, 60, 20)],
+                  **{"class": ["commercial", "commercial", "apartments", "commercial"], "height": [nan, nan, nan, nan],
+                     "num_floors": [nan, 4.0, nan, nan], "min_height": [nan] * 4, "name": [""] * 4})
+        land = Feats(["m", "r"], [ll(0, 0, 150, 150), ll(150, 0, 100, 150)],
+                     **{"class": ["retail", "retail"], "name": ["Praska Giełda Spożywcza", ""],
+                        "tags": ['{"landuse":"retail","shop":"wholesale"}', '{"landuse":"retail"}']})
+        land.kind = np.full(2, 3, np.uint8)
+        ground = lambda la, lo: np.zeros(np.shape(la))
+        self.assertEqual(len(bld.MarketLand([land, None, land]).areas), 1)
+
+        def specs(**kw):
+            items = bld.tile_buildings(f, 0, 0, 256, 256, [b], ground, **kw)
+            return {round(float(s.ring[:, 0].min() + s.ring[:, 1].min())): s for s, _, _ in items}
+        plain, got = specs(), specs(market_land_layers=[land])
+        self.assertEqual(sorted(got), [40, 80, 120, 190])
+        hall = got[40]
+        self.assertEqual((hall.floors, hall.windows, hall.cls), (1, False, "warehouse"))
+        self.assertTrue(hall.wall.startswith(bld.METALWALL))
+        self.assertTrue(plain[40].shop and plain[40].windows is not False)
+        for k in (80, 120, 190):            # four mapped floors, flats, plain retail land
+            self.assertEqual((got[k].floors, got[k].height, got[k].facade, got[k].shop),
+                             (plain[k].floors, plain[k].height, plain[k].facade, plain[k].shop), k)
+        self.assertEqual(got[80].floors, 4)
+
+
 class ElevatorTest(unittest.TestCase):
     def test_a_tall_slender_footprint_in_a_plains_town_is_a_grain_elevator(self):
         # Strasburg, CO: two 25 m tall footprints by the railroad came out as 8-storey brick apartments

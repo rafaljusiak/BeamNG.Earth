@@ -17,6 +17,7 @@ from runtimeprofiler import step as profile_step
 import os
 import hashlib
 import math
+import re
 
 import numpy as np
 
@@ -281,6 +282,93 @@ HOUSE_CLASSES = {"house", "detached", "semidetached_house", "bungalow", "residen
 ROW_CLASSES = {"terrace"}
 GARAGE_MIN_M2 = 400.0       # a "parking" building this big is a parking structure
 INDUSTRIAL_CLASSES = {"industrial", "warehouse", "manufacture", "factory", "hangar"}
+# Market halls (the user, 2026-11-13, at Praska Giełda Spożywcza in Ząbki by Warsaw, 52.27663 N 21.11285 E: one of
+# Poland's largest wholesale food markets, long low metal halls round truck yards, drawn as two- to four-storey shops
+# and offices with shopfronts). Its ~50 buildings are tagged building=commercial or yes and nothing else; only the
+# area round them says what they are. A building of an unspecific class without a mapped height or floor count that
+# stands on a market's land (MarketLand: attrs["market"]) or is named a market itself (MARKET_NAME) is a hall: one
+# storey, a warehouse's corrugated metal walls and flat roof, no windows, no storefront.
+MARKET_CLASSES = {"", "yes", "commercial", "retail", "warehouse", "service", "marketplace"}
+# (Polish: giełda, bazar, targowisko, rynek hurtowy, hala targowa. Tried on a building's own name and on the name of
+# land mapped landuse=retail; the tags amenity=marketplace and shop=wholesale need no name, in any country)
+MARKET_NAME = re.compile(r"\b(?:gie[łl]d|bazar|targowisk|rynek hurtowy|hal[aei] targow)", re.I)
+MARKET_HALL_M2 = 150.0          # m2: a footprint this large is a hall ...
+MARKET_HALL_M = (4.4, 6.4)      # ... its storey this tall (m, by its seed; 5-7 m with the flat roof's parapet);
+MARKET_STALL_M = (3.0, 3.8)     # a smaller one a row of stalls or a pavilion (under 40 m2: a shed, as anywhere)
+
+
+class MarketLand:
+    """The market grounds among land_use layers (mapgeom.Features, one per map cell): polygons whose OpenStreetMap
+    tags say amenity=marketplace or shop=wholesale, or retail land named a market (MARKET_NAME). Found once per decoded
+    layer (kept on it)."""
+
+    def __init__(self, layers):
+        self.areas = []             # (outer (n, 2) lon/lat, [holes], bbox)
+        seen = set()
+        for f in layers:
+            if f is None or not len(f.kind) or "class" not in f.attrs:
+                continue
+            got = f.__dict__.get("_bnge_markets")
+            if got is None:
+                got = f.__dict__["_bnge_markets"] = self._of(f)
+            for fid, area in got:
+                if (fid, area[2]) not in seen:
+                    seen.add((fid, area[2]))
+                    self.areas.append(area)
+
+    @staticmethod
+    def is_market(cls, name, tags):
+        """Whether land of Overture class cls, its name and its OpenStreetMap tags (a dict) is a market's."""
+        if tags.get("amenity") == "marketplace" or tags.get("shop") == "wholesale":
+            return True
+        return (cls == "retail" or tags.get("landuse") == "retail") and bool(MARKET_NAME.search(name or ""))
+
+    @classmethod
+    def _of(cls, f):
+        import json
+        a = f.attrs
+        tags_, names = a.get("tags"), a.get("name")
+        out = []
+        for i in range(len(f.kind)):
+            if int(f.kind[i]) != 3:
+                continue
+            c = str(a["class"][i])
+            t = str(tags_[i]) if tags_ is not None else ""
+            name = str(names[i]) if names is not None else ""
+            if not ("marketplace" in t or "wholesale" in t or (name and (c == "retail" or '"retail"' in t))):
+                continue                # (the tags are JSON text: parsed only where they can say so)
+            try:
+                tags = json.loads(t) if t else {}
+            except ValueError:
+                tags = {}
+            if not isinstance(tags, dict) or not cls.is_market(c, name, tags):
+                continue
+            for p in f.parts(i):
+                rings = [np.asarray(r, np.float64) for r in p]
+                if not rings or any(r.ndim != 2 or r.shape[1] != 2 or len(r) < 4 or not np.isfinite(r).all()
+                                    for r in rings):
+                    continue
+                o = rings[0]
+                out.append((str(f.ids[i]), (o, rings[1:], (*o.min(0), *o.max(0)))))
+        return out
+
+    def at_many(self, lats, lons):
+        """Per point: on a market's ground."""
+        import polygon
+        lats, lons = np.asarray(lats, np.float64).ravel(), np.asarray(lons, np.float64).ravel()
+        res = np.zeros(len(lats), bool)
+        pts = np.column_stack((lons, lats))
+        for outer, holes, (bx0, by0, bx1, by1) in self.areas:
+            near = np.flatnonzero((lons >= bx0) & (lons <= bx1) & (lats >= by0) & (lats <= by1) & ~res)
+            if not len(near):
+                continue
+            q = pts[near]
+            inside = polygon.contains_points(outer, q)
+            for h in holes:
+                if inside.any():
+                    inside &= ~polygon.contains_points(h, q)
+            res[near[inside]] = True
+        return res
 
 
 def _hash01(*vals):
@@ -290,6 +378,14 @@ def _hash01(*vals):
 
 
 # ------------------------------------------------------------------------------------------- polygons
+
+def _given(v):
+    """Whether a mapped number (a height, a floor count) is there: finite and over 0."""
+    try:
+        return v is not None and bool(np.isfinite(v)) and v > 0
+    except TypeError:
+        return False
+
 
 def _area2(p):
     """Twice the signed area of the ring p (n, 2), counter-clockwise positive."""
@@ -507,7 +603,7 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
          alpine=False):
     """The Spec of a footprint (local ring (n, 2) in metres, counter-clockwise) from its Overture attributes
     (dict: class, height, num_floors, min_height, roof_shape, roof_height; garage: a mapped multi-storey car park
-    covers it, garage_rings) and the number of buildings
+    covers it, garage_rings; market: it stands on a market's ground, MarketLand) and the number of buildings
     sharing a wall with it. Height and roof are predicted when not given. west_town: a small town of the
     arid West (district_town): single-storey main streets and ranch houses."""
     if attrs.get("landmark"):           # (landmarks.py: its own model, no prediction)
@@ -537,9 +633,15 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
     # shed class, which made big garages barns in barn-red siding (Columbia, 2026-10-14)
     garage = (cls in ("parking", "parking_garage") and area >= GARAGE_MIN_M2) or "parking garage" in name or (
         "garage" in name and area > 800) or (bool(attrs.get("garage")) and cls in GARAGE_TAG_CLASSES)
+    # a market's hall (MARKET_CLASSES): nothing mapped says how tall, so one storey of a warehouse's metal walls
+    market = (cls in MARKET_CLASSES and area >= 40 and (bool(attrs.get("market")) or bool(MARKET_NAME.search(name)))
+              and not _given(attrs.get("height")) and not _given(attrs.get("num_floors"))
+              and not (garage or terminal or church or attrs.get("bridge_part") or attrs.get("bridge_masonry")))
+    if market:
+        cls = "warehouse"
     narrow = hw < 4.2 and hl > 2.2 * hw                 # a row house: ~4-8 m wide, deep
     # in a dense core small buildings are row houses even where the footprints leave gaps (Fells Point)
-    row = cls in ROW_CLASSES or (not west_town and ((narrow and (neighbours >= 1 or dense)) or (
+    row = cls in ROW_CLASSES or (not west_town and not market and ((narrow and (neighbours >= 1 or dense)) or (
         dense and area < 260 and cls not in SHOP_CLASSES)))
     shed = (cls in SHED_CLASSES and not garage) or (area < 40 and not row)
     shop = cls in SHOP_CLASSES
@@ -602,8 +704,11 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
     barn = cls in BARN_CLASSES or (shed and area >= 150 and cls not in ("garage", "garages", "carport", "roof", "shelter"))
     if barn:
         floor_h = 5.5 if area >= 150 else 3.5          # one tall storey; the gable above it
+    if market:
+        lo, hi = MARKET_HALL_M if area >= MARKET_HALL_M2 else MARKET_STALL_M
+        floor_h = lo + (hi - lo) * _hash01(seed, "market")
     if h is None and nf is None:
-        if shed:
+        if shed or market:
             nf = 1
         elif row:
             nf = 2 if seed < 0.25 else (3 if seed < 0.85 else 4)
@@ -805,6 +910,11 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
         kind = METALWALL if industrial else PANEL
         wall = f"{kind}|{int(_hash01(seed, 'wc') * len(WALL_TINTS[kind]))}"
         facade, windows = wall, False
+    if market:      # blank metal walls all round under any roof: no storefront band, sign band or roof plant (plain)
+        if wall is None:        # (a mapped wall material stays; a mapped colour paints the metal)
+            wall = custom_look(METALWALL, fc) if fc is not None else \
+                f"{METALWALL}|{int(_hash01(seed, 'wc') * len(WALL_TINTS[METALWALL]))}"
+        facade, windows, plain = wall, False, True
     rmat = str(attrs.get("roof_material") or "").lower()
     if rmat in ("metal", "tin", "steel", "zinc", "corrugated_iron", "sheet"):
         roof_mat = f"{ROOF_METAL}|{int(_hash01(seed, 'roof') * len(ROOF_TINTS[ROOF_METAL]))}"
@@ -820,7 +930,7 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
         roof_mat = f"{ROOF_FLAT}|{int(_hash01(seed, 'roof') * len(ROOF_TINTS[ROOF_FLAT]))}"
     elif rmat == "glass":
         roof_mat = f"{OFFICE}|0"
-    elif roof == "flat" or barn or shed:
+    elif roof == "flat" or barn or shed or market:
         roof_mat = ROOF_FLAT if roof == "flat" else ROOF_METAL
         roof_mat = f"{roof_mat}|{int(_hash01(seed, 'roof') * len(ROOF_TINTS[roof_mat]))}"
     else:       # the region's pitched roofs (the US: slate or shingle by the seed, their first four tints)
@@ -2616,7 +2726,8 @@ def _outline_under_parts(at, bparts):
 @profile_step('Building site selection')
 def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=(), west_town=False, roads_xy=None,
                    tunnels_xy=None, garages_xy=None, supports=None, bridges_xy=None, water_xy=None, decks=None,
-                   ml_roads_xy=None, ways_xy=None, skip=frozenset(), min_size=None, own=None, house_land_layers=()):
+                   ml_roads_xy=None, ways_xy=None, skip=frozenset(), min_size=None, own=None, house_land_layers=(),
+                   market_land_layers=()):
     """[(Spec, gmin, gmax)] of the buildings whose footprint centroid is in the tile [x0, x1) x [y0, y1) (own: the
     tile's box when it says which points are its own, roads.box_owns: a geotile's)
     (anchor frame), rings relative to (x0, y0). layers: mapgeom.Features of buildings (one per map cell; a
@@ -2629,7 +2740,8 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
     buildings) is a deck, a boat or a vehicle, left out (_ml_false). skip: ids of buildings left out (a gas station's
     canopy, drawn by the mod from the stock levels' props: gasstations.tile_sites). min_size (min height m, min
     footprint m²): only buildings at least that tall or that large (the skyline tiles: skyline_tile), tested before
-    any other work on a building."""
+    any other work on a building. market_land_layers: the cells' land_use (MarketLand: a building whose centre is on a
+    market's ground gets attrs["market"], plan's market hall)."""
     parts_of = _PartsOf(frame, part_layers)     # building id -> [(ring in the anchor frame, (own height, bottom))]
     seen = set()
     rings, attrs, looks, mins = [], [], [], []
@@ -2852,6 +2964,14 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
         cnt = np.maximum(np.asarray(ends, np.int64) - starts, 1)
         house_res = house_land.at_many(np.add.reduceat(la_all, starts) / cnt, np.add.reduceat(lo_all, starts) / cnt) \
             if len(la_all) else np.zeros(len(rings), bool)
+    market_land = MarketLand(market_land_layers) if market_land_layers else None
+    if market_land is not None and market_land.areas and len(la_all):
+        starts = np.concatenate(([0], np.asarray(ends[:-1], np.int64)))
+        cnt = np.maximum(np.asarray(ends, np.int64) - starts, 1)
+        on_market = market_land.at_many(np.add.reduceat(la_all, starts) / cnt, np.add.reduceat(lo_all, starts) / cnt)
+        for k in np.flatnonzero(on_market).tolist():
+            if looks[k] is None and mins[k] <= 0.5:     # (not a building's parts: those have mapped heights)
+                attrs[k] = dict(attrs[k], market=True)
     for k, (ring, at, sh, look, mh) in enumerate(zip(rings, attrs, shared, looks, mins)):
         if mh > 0.5 and at.get("height") is not None and np.isfinite(at["height"]) and look is None:
             at = dict(at, height=max(2.5, float(at["height"]) - mh))     # a building's own height range
@@ -3814,11 +3934,12 @@ def road_tile_items(
 
     box = roads.tile_bbox(tx, ty)
     x0, y0, x1, y1 = box
-    house_layers = ("land_use",) if francehouses.needs_residential_land(frame, box) else ()
+    # (land use: the market grounds, MarketLand. roads.tile_needs asks for it with every road tile: no fetch of its own)
+    house_land = francehouses.needs_residential_land(frame, box)
     cds = [
         md.cell(
             k,
-            layers=("buildings", "building_parts", "roads", "infrastructure", "water") + house_layers,
+            layers=("buildings", "building_parts", "roads", "infrastructure", "water", "land_use"),
             kind="demand",
         )
         for k in roads.cells_of_tile(frame, tx, ty, margin=0.0)
@@ -3856,7 +3977,8 @@ def road_tile_items(
         if decks
         else None,
         skip=skip,
-        house_land_layers=[c.layers.get("land_use") for c in cds],
+        house_land_layers=[c.layers.get("land_use") for c in cds] if house_land else (),
+        market_land_layers=[c.layers.get("land_use") for c in cds],
     )
     custom = []
     if cache_dir is not None:
@@ -4159,6 +4281,7 @@ def far_items(frame, tile, ty, md, ground, lamp_region=None):
     items = tile_buildings(frame, x0, y0, x1, y1, [c.layers.get("buildings") for c in cds], ground, own=own,
                            part_layers=[c.layers.get("building_parts") for c in cds],
                            house_land_layers=[c.layers.get("land_use") for c in cds],
+                           market_land_layers=[c.layers.get("land_use") for c in cds if "land_use" in layers],
                            west_town=district_town(frame, tile, ty, md),
                            garages_xy=garage_rings(frame, [c.layers.get("infrastructure") for c in cds], x0, y0),
                            supports=support_rings(frame, [c.layers.get("infrastructure") for c in cds], x0, y0),
